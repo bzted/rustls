@@ -19,7 +19,7 @@ use crate::error::InvalidMessage;
 #[cfg(feature = "tls12")]
 use crate::ffdhe_groups::FfdheGroup;
 use crate::log::warn;
-use crate::msgs::base::{Payload, PayloadU8, PayloadU16, PayloadU24};
+use crate::msgs::base::{Payload, PayloadU16, PayloadU24, PayloadU8};
 use crate::msgs::codec::{self, Codec, LengthPrefixedBuffer, ListLength, Reader, TlsListElement};
 use crate::msgs::enums::{
     CertificateStatusType, CertificateType, ClientCertificateType, Compression, ECCurveType,
@@ -310,6 +310,38 @@ impl ConvertServerNameList for [ServerName] {
         self.iter()
             .filter_map(only_dns_hostnames)
             .next()
+    }
+}
+// New struct for the KemEncapsulation message Payload
+#[derive(Clone, Debug)]
+pub struct KemEncapsulationPayload {
+    pub(crate) algorithm: NamedGroup,
+    pub(crate) ciphertext: PayloadU16,
+}
+
+impl KemEncapsulationPayload {
+    pub fn new(algorithm: NamedGroup, ciphertext: Vec<u8>) -> Self {
+        Self {
+            algorithm,
+            ciphertext: PayloadU16::new(ciphertext),
+        }
+    }
+}
+
+impl Codec<'_> for KemEncapsulationPayload {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        self.algorithm.encode(bytes);
+        self.ciphertext.encode(bytes);
+    }
+
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
+        let algorithm = NamedGroup::read(r)?;
+        let ciphertext = PayloadU16::read(r)?;
+
+        Ok(Self {
+            algorithm,
+            ciphertext,
+        })
     }
 }
 
@@ -2592,6 +2624,7 @@ pub enum HandshakePayload<'a> {
     Finished(Payload<'a>),
     CertificateStatus(CertificateStatus<'a>),
     MessageHash(Payload<'a>),
+    KemEncapsulation(KemEncapsulationPayload),
     Unknown(Payload<'a>),
 }
 
@@ -2618,6 +2651,7 @@ impl HandshakePayload<'_> {
             Finished(x) => x.encode(bytes),
             CertificateStatus(x) => x.encode(bytes),
             MessageHash(x) => x.encode(bytes),
+            KemEncapsulation(ref x) => x.encode(bytes),
             Unknown(x) => x.encode(bytes),
         }
     }
@@ -2647,6 +2681,7 @@ impl HandshakePayload<'_> {
             Finished(x) => Finished(x.into_owned()),
             CertificateStatus(x) => CertificateStatus(x.into_owned()),
             MessageHash(x) => MessageHash(x.into_owned()),
+            KemEncapsulation(x) => KemEncapsulation(x),
             Unknown(x) => Unknown(x.into_owned()),
         }
     }
@@ -2759,6 +2794,9 @@ impl<'a> HandshakeMessagePayload<'a> {
             HandshakeType::HelloRetryRequest => {
                 // not legal on wire
                 return Err(InvalidMessage::UnexpectedMessage("HelloRetryRequest"));
+            }
+            HandshakeType::KemEncapsulation => {
+                HandshakePayload::KemEncapsulation(KemEncapsulationPayload::read(&mut sub)?)
             }
             _ => HandshakePayload::Unknown(Payload::read(&mut sub)),
         };
