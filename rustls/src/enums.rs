@@ -64,7 +64,7 @@ enum_builder! {
         ServerKeyExchange => 0x0c,
         CertificateRequest => 0x0d,
         ServerHelloDone => 0x0e,
-        CertificateVerify => 0x0f,
+        CertificateVerify => 0x0f, // THIS MESSAGE WON'T BE USED
         ClientKeyExchange => 0x10,
         Finished => 0x14,
         CertificateURL => 0x15,
@@ -72,6 +72,7 @@ enum_builder! {
         KeyUpdate => 0x18,
         CompressedCertificate => 0x19,
         MessageHash => 0xfe,
+        KemEncapsulation => 0xFF, // Added KemEncapsulation message
     }
 }
 
@@ -601,7 +602,7 @@ enum_builder! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::msgs::enums::tests::{test_enum8, test_enum16};
+    use crate::msgs::enums::tests::{test_enum16, test_enum8};
 
     #[test]
     fn test_enums() {
