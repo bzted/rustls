@@ -315,14 +315,14 @@ impl ConvertServerNameList for [ServerName] {
 // New struct for the KemEncapsulation message Payload
 #[derive(Clone, Debug)]
 pub struct KemEncapsulationPayload {
-    pub(crate) algorithm: NamedGroup,
+    pub(crate) certificate_req_context: PayloadU16,
     pub(crate) ciphertext: PayloadU16,
 }
 
 impl KemEncapsulationPayload {
-    pub fn new(algorithm: NamedGroup, ciphertext: Vec<u8>) -> Self {
+    pub fn new(certificate_req_context: Vec<u8>, ciphertext: Vec<u8>) -> Self {
         Self {
-            algorithm,
+            certificate_req_context: PayloadU16::new(certificate_req_context),
             ciphertext: PayloadU16::new(ciphertext),
         }
     }
@@ -330,16 +330,17 @@ impl KemEncapsulationPayload {
 
 impl Codec<'_> for KemEncapsulationPayload {
     fn encode(&self, bytes: &mut Vec<u8>) {
-        self.algorithm.encode(bytes);
+        self.certificate_req_context
+            .encode(bytes);
         self.ciphertext.encode(bytes);
     }
 
     fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
-        let algorithm = NamedGroup::read(r)?;
+        let certificate_req_context = PayloadU16::read(r)?;
         let ciphertext = PayloadU16::read(r)?;
 
         Ok(Self {
-            algorithm,
+            certificate_req_context,
             ciphertext,
         })
     }
