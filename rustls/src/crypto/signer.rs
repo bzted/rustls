@@ -9,7 +9,7 @@ use crate::enums::{SignatureAlgorithm, SignatureScheme};
 use crate::error::{Error, InconsistentKeys};
 use crate::server::{ClientHello, ParsedCertificate, ResolvesServerCert};
 use crate::sync::Arc;
-use crate::x509;
+use crate::{x509, NamedGroup};
 
 use super::CryptoProvider;
 
@@ -72,6 +72,11 @@ pub trait SigningKey: Debug + Send + Sync {
 
     /// What kind of key we have.
     fn algorithm(&self) -> SignatureAlgorithm;
+}
+
+pub trait KemKey: Send + Sync + Debug {
+    fn decapsulate(&self, ciphertext: &[u8]) -> Result<Vec<u8>, Error>;
+    fn algorithm(&self) -> NamedGroup;
 }
 
 /// A thing that can sign a message.
@@ -141,6 +146,8 @@ pub struct CertifiedKey {
     /// An optional OCSP response from the certificate issuer,
     /// attesting to its continued validity.
     pub ocsp: Option<Vec<u8>>,
+
+    pub kem_key: Option<Arc<dyn KemKey>>,
 }
 
 impl CertifiedKey {
@@ -177,6 +184,7 @@ impl CertifiedKey {
             cert,
             key,
             ocsp: None,
+            kem_key: None,
         }
     }
 
