@@ -380,11 +380,15 @@ impl KeyScheduleHandshake {
     pub(crate) fn into_authenticated_handshake(
         self,
         server_ss: &[u8],
-        hs_hash: hash::Output,
+        hs_hash: &hash::Output,
         key_log: &dyn KeyLog,
         client_random: &[u8; 32],
         common: &mut CommonState,
     ) -> KeyScheduleAuthenticatedHandshake {
+        debug_assert!(
+            !server_ss.is_empty(),
+            "Server Shared Secret cannot be empty"
+        );
         let derived_secret = self
             .ks
             .derive_for_empty_hash(SecretKind::DerivedSecret);
@@ -665,6 +669,24 @@ pub(crate) struct KeyScheduleAuthenticatedHandshake {
 }
 
 impl KeyScheduleAuthenticatedHandshake {
+    fn derive_main_secret(&self, client_ss: Option<&[u8]>) -> KeySchedule {
+        let derived_secret = self
+            .ks
+            .derive_for_empty_hash(SecretKind::DerivedSecret);
+
+        // Input keying material - zero if no client auth
+        let ikm = client_ss.unwrap_or(&[0u8; 32]);
+
+        KeySchedule {
+            current: self
+                .ks
+                .suite
+                .hkdf_provider
+                .extract_from_secret(Some(derived_secret.as_ref()), ikm),
+            suite: self.ks.suite,
+        }
+    }
+
     pub(crate) fn into_pre_finished_client_traffic(
         self,
         client_ss: Option<&[u8]>,
@@ -673,21 +695,7 @@ impl KeyScheduleAuthenticatedHandshake {
         key_log: &dyn KeyLog,
         client_random: &[u8; 32],
     ) -> (KeyScheduleClientBeforeFinished, hmac::Tag) {
-        let derived_secret = self
-            .ks
-            .derive_for_empty_hash(SecretKind::DerivedSecret);
-
-        // Input keying material
-        let ikm = client_ss.unwrap_or(&[0u8; 32]);
-
-        let mut ms_ks = KeySchedule {
-            current: self
-                .ks
-                .suite
-                .hkdf_provider
-                .extract_from_secret(Some(derived_secret.as_ref()), ikm),
-            suite: self.ks.suite,
-        };
+        let mut ms_ks = self.derive_main_secret(client_ss);
 
         let traffic = KeyScheduleTraffic::new(ms_ks, pre_finished_hash, key_log, client_random);
 
@@ -706,20 +714,7 @@ impl KeyScheduleAuthenticatedHandshake {
     ) -> KeyScheduleTrafficWithClientFinishedPending {
         debug_assert_eq!(common.side, Side::Server);
 
-        let derived_secret = self
-            .ks
-            .derive_for_empty_hash(SecretKind::DerivedSecret);
-
-        let ikm = client_ss.unwrap_or(&[0u8; 32]);
-
-        let mut ms_ks = KeySchedule {
-            current: self
-                .ks
-                .suite
-                .hkdf_provider
-                .extract_from_secret(Some(derived_secret.as_ref()), ikm),
-            suite: self.ks.suite,
-        };
+        let mut ms_ks = self.derive_main_secret(client_ss);
 
         let client_application_traffic_secret = ms_ks.derive_logged_secret(
             SecretKind::ClientApplicationTrafficSecret,
