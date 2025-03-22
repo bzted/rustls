@@ -1,25 +1,26 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt::Debug;
+use signer::KemKey;
 
 use pki_types::PrivateKeyDer;
 use zeroize::Zeroize;
 
-#[cfg(all(doc, feature = "tls12"))]
-use crate::Tls12CipherSuite;
 use crate::msgs::ffdhe_groups::FfdheGroup;
 use crate::sign::SigningKey;
 use crate::sync::Arc;
 pub use crate::webpki::{
-    WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature,
-    verify_tls13_signature_with_raw_key,
+    verify_tls12_signature, verify_tls13_signature, verify_tls13_signature_with_raw_key,
+    WebPkiSupportedAlgorithms,
 };
+#[cfg(all(doc, feature = "tls12"))]
+use crate::Tls12CipherSuite;
 #[cfg(doc)]
 use crate::{
-    ClientConfig, ConfigBuilder, ServerConfig, SupportedCipherSuite, Tls13CipherSuite, client,
-    crypto, server, sign,
+    client, crypto, server, sign, ClientConfig, ConfigBuilder, ServerConfig, SupportedCipherSuite,
+    Tls13CipherSuite,
 };
-use crate::{Error, NamedGroup, ProtocolVersion, SupportedProtocolVersion, suites};
+use crate::{suites, Error, NamedGroup, ProtocolVersion, SupportedProtocolVersion};
 
 /// *ring* based CryptoProvider.
 #[cfg(feature = "ring")]
@@ -343,6 +344,14 @@ pub trait KeyProvider: Send + Sync + Debug {
         &self,
         key_der: PrivateKeyDer<'static>,
     ) -> Result<Arc<dyn SigningKey>, Error>;
+
+    fn load_kem_private_key(
+        &self,
+        key_der: PrivateKeyDer<'static>,
+        algorithm: NamedGroup,
+    ) -> Result<Arc<dyn KemKey>, Error> {
+        Err(Error::General("KEM Keys not supported".into()))
+    }
 
     /// Return `true` if this is backed by a FIPS-approved implementation.
     ///
