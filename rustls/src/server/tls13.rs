@@ -13,15 +13,18 @@ use crate::common_state::{
     CommonState, HandshakeFlightTls13, HandshakeKind, Protocol, Side, State,
 };
 use crate::conn::ConnectionRandoms;
+use crate::crypto::signer::KemKey;
 use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
 use crate::log::{debug, trace, warn};
+use crate::msgs::base::{Payload, PayloadU16, PayloadU8};
 use crate::msgs::codec::{Codec, Reader};
 use crate::msgs::enums::KeyUpdateRequest;
 use crate::msgs::handshake::{
-    CERTIFICATE_MAX_SIZE_LIMIT, CertificateChain, CertificatePayloadTls13, HandshakeMessagePayload,
-    HandshakePayload, NewSessionTicketExtension, NewSessionTicketPayloadTls13,
+    CertificateChain, CertificatePayloadTls13, HandshakeMessagePayload, HandshakePayload,
+    KemEncapsulationPayload, NewSessionTicketExtension, NewSessionTicketPayloadTls13,
+    CERTIFICATE_MAX_SIZE_LIMIT,
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist;
@@ -29,12 +32,13 @@ use crate::server::ServerConfig;
 use crate::suites::PartiallyExtractedSecrets;
 use crate::sync::Arc;
 use crate::tls13::key_schedule::{
-    KeyScheduleTraffic, KeyScheduleTrafficWithClientFinishedPending, ResumptionSecret,
+    self, KeyScheduleAuthenticatedHandshake, KeyScheduleHandshake, KeyScheduleTraffic,
+    KeyScheduleTrafficWithClientFinishedPending, ResumptionSecret,
 };
 use crate::tls13::{
-    Tls13CipherSuite, construct_client_verify_message, construct_server_verify_message,
+    construct_client_verify_message, construct_server_verify_message, Tls13CipherSuite,
 };
-use crate::{compress, rand, verify};
+use crate::{compress, rand, verify, NamedGroup};
 
 mod client_hello {
     use super::*;
@@ -385,6 +389,21 @@ mod client_hello {
                 } else {
                     emit_certificate_tls13(&mut flight, server_key.get_cert(), ocsp_response);
                 }
+                flight.finish(cx.common);
+                let server_kem_key = server_key.get_kem_key();
+
+                return Ok(Box::new(ExpectClientKemEncapsulation {
+                    config: Arc::clone(&self.config),
+                    transcript: self.transcript,
+                    key_schedule,
+                    randoms: self.randoms,
+                    suite: self.suite,
+                    client_auth,
+                    server_cert: CertificateChain(server_key.get_cert().to_vec()),
+                    server_key: server_kem_key,
+                    send_tickets: self.send_tickets,
+                }));
+                /*
                 emit_certificate_verify_tls13(
                     &mut flight,
                     cx.common,
@@ -392,6 +411,7 @@ mod client_hello {
                     &sigschemes_ext,
                 )?;
                 client_auth
+                */
             } else {
                 false
             };
@@ -847,6 +867,33 @@ mod client_hello {
     }
 }
 
+fn encapsulate(algorithm: NamedGroup, server_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    let kem: oqs::kem::Kem = match algorithm {
+        NamedGroup::MLKEM512 => oqs::kem::Kem::new(oqs::kem::Algorithm::MlKem512),
+        NamedGroup::MLKEM768 => oqs::kem::Kem::new(oqs::kem::Algorithm::MlKem768),
+        NamedGroup::MLKEM1024 => oqs::kem::Kem::new(oqs::kem::Algorithm::MlKem1024),
+        _ => return Err(Error::General("Unsupported KEM algorithm".into())),
+    }
+    .map_err(|_| Error::General("Failed to create KEM instance".into()))?;
+
+    let pk = kem
+        .public_key_from_bytes(server_pk)
+        .ok_or_else(|| Error::General("Invalid public key".into()))?;
+    let (ct, ss) = kem
+        .encapsulate(&pk)
+        .map_err(|_| Error::General("Encapsulation failed".into()))?;
+
+    Ok((ct.as_ref().to_vec(), ss.as_ref().to_vec()))
+}
+
+fn get_client_pk_from_cert(cert: &CertificateDer<'_>) -> Result<Vec<u8>, Error> {
+    let (_, x509) = x509_parser::parse_x509_certificate(cert.as_ref())
+        .map_err(|_| Error::General("Failed to parse certificate".into()))?;
+
+    let pk = x509.public_key();
+
+    Ok(pk.subject_public_key.data.to_vec())
+}
 struct ExpectAndSkipRejectedEarlyData {
     skip_data_left: usize,
     next: Box<hs::ExpectClientHello>,
@@ -1129,6 +1176,325 @@ impl State<ServerConnectionData> for ExpectCertificate {
     }
 }
 
+struct ExpectClientKemEncapsulation {
+    config: Arc<ServerConfig>,
+    transcript: HandshakeHash,
+    suite: &'static Tls13CipherSuite,
+    key_schedule: KeyScheduleHandshake,
+    randoms: ConnectionRandoms,
+    client_auth: bool,
+    server_cert: CertificateChain<'static>,
+    server_key: Arc<dyn KemKey>,
+    send_tickets: usize,
+}
+impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
+    fn handle<'m>(
+        mut self: Box<Self>,
+        cx: &mut ServerContext<'_>,
+        m: Message<'m>,
+    ) -> hs::NextStateOrError<'m>
+    where
+        Self: 'm,
+    {
+        let client_kem = require_handshake_msg!(
+            m,
+            HandshakeType::KemEncapsulation,
+            HandshakePayload::KemEncapsulation
+        )?;
+
+        self.transcript.add_message(&m);
+
+        let server_ss = self
+            .server_key
+            .decapsulate(client_kem.ciphertext.0.as_ref())?;
+
+        let hs_hash = self.transcript.current_hash();
+
+        let auth_handhsake_key_schedule = self
+            .key_schedule
+            .into_authenticated_handshake(
+                &server_ss,
+                &hs_hash,
+                &*self.config.key_log,
+                &self.randoms.client,
+                cx.common,
+            );
+        if self.client_auth {
+            Ok(Box::new(ExpectCertificateForClientAuth {
+                config: self.config,
+                transcript: self.transcript,
+                suite: self.suite,
+                key_schedule: auth_handhsake_key_schedule,
+                randoms: self.randoms,
+                server_cert: self.server_cert,
+                send_tickets: self.send_tickets,
+            }))
+        } else {
+            Ok(Box::new(ExpectClientFinished {
+                config: self.config,
+                transcript: self.transcript,
+                suite: self.suite,
+                key_schedule: auth_handhsake_key_schedule,
+                randoms: self.randoms,
+                client_auth: None,
+                send_tickets: self.send_tickets,
+            }))
+        }
+    }
+
+    fn into_owned(self: Box<Self>) -> hs::NextState<'static> {
+        self
+    }
+}
+
+struct ExpectCertificateForClientAuth {
+    config: Arc<ServerConfig>,
+    transcript: HandshakeHash,
+    suite: &'static Tls13CipherSuite,
+    key_schedule: KeyScheduleAuthenticatedHandshake,
+    randoms: ConnectionRandoms,
+    server_cert: CertificateChain<'static>,
+    send_tickets: usize,
+}
+
+impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
+    fn handle<'m>(
+        mut self: Box<Self>,
+        cx: &mut ServerContext<'_>,
+        m: Message<'m>,
+    ) -> hs::NextStateOrError<'m>
+    where
+        Self: 'm,
+    {
+        self.transcript.add_message(&m);
+
+        let cert_chain = require_handshake_msg_move!(
+            m,
+            HandshakeType::Certificate,
+            HandshakePayload::CertificateTls13
+        )?;
+
+        if cert_chain.context.0.is_empty() {
+            if self
+                .config
+                .verifier
+                .client_auth_mandatory()
+            {
+                return Err(Error::NoCertificatesPresented);
+            }
+
+            return Ok(Box::new(ExpectClientFinished {
+                config: self.config,
+                transcript: self.transcript,
+                suite: self.suite,
+                key_schedule: self.key_schedule,
+                randoms: self.randoms,
+                client_auth: None,
+                send_tickets: self.send_tickets,
+            }));
+        }
+
+        let owned_chain = cert_chain
+            .into_certificate_chain()
+            .into_owned();
+        let (leaf_cert, ca_certs) = owned_chain
+            .split_first()
+            .ok_or(Error::NoCertificatesPresented)?;
+
+        let now = self.config.current_time()?;
+        self.config
+            .verifier
+            .verify_client_cert(leaf_cert, ca_certs, now)?;
+
+        let client_pk = get_client_pk_from_cert(leaf_cert)?;
+
+        let kx_group = cx
+            .common
+            .negotiated_key_exchange_group()
+            .expect("Negotiated Kx Group not found");
+        let algorithm = kx_group.name();
+
+        // encapsulate to client public key
+        let (ct, client_ss) = encapsulate(algorithm, &client_pk)?;
+
+        let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
+
+        flight.add(HandshakeMessagePayload {
+            typ: HandshakeType::KemEncapsulation,
+            payload: HandshakePayload::KemEncapsulation(KemEncapsulationPayload {
+                certificate_req_context: PayloadU8::new(Vec::new()),
+                ciphertext: PayloadU16::new(ct),
+            }),
+        });
+
+        flight.finish(cx.common);
+
+        cx.common.peer_certificates = Some(owned_chain.clone());
+
+        Ok(Box::new(ExpectClientFinished {
+            config: self.config,
+            transcript: self.transcript,
+            suite: self.suite,
+            key_schedule: self.key_schedule,
+            randoms: self.randoms,
+            client_auth: Some(client_ss),
+            send_tickets: self.send_tickets,
+        }))
+    }
+
+    fn into_owned(self: Box<Self>) -> hs::NextState<'static> {
+        self
+    }
+}
+
+struct ExpectClientFinished {
+    config: Arc<ServerConfig>,
+    transcript: HandshakeHash,
+    suite: &'static Tls13CipherSuite,
+    key_schedule: KeyScheduleAuthenticatedHandshake,
+    randoms: ConnectionRandoms,
+    client_auth: Option<Vec<u8>>,
+    send_tickets: usize,
+}
+impl ExpectClientFinished {
+    fn emit_ticket(
+        flight: &mut HandshakeFlightTls13<'_>,
+        suite: &'static Tls13CipherSuite,
+        cx: &ServerContext<'_>,
+        secret: &ResumptionSecret<'_>,
+        config: &ServerConfig,
+    ) -> Result<(), Error> {
+        let secure_random = config.provider.secure_random;
+        let nonce = rand::random_vec(secure_random, 32)?;
+        let age_add = rand::random_u32(secure_random)?;
+
+        let now = config.current_time()?;
+
+        let plain =
+            get_server_session_value(suite, secret, cx, &nonce, now, age_add).get_encoding();
+
+        let stateless = config.ticketer.enabled();
+        let (ticket, lifetime) = if stateless {
+            let Some(ticket) = config.ticketer.encrypt(&plain) else {
+                return Ok(());
+            };
+            (ticket, config.ticketer.lifetime())
+        } else {
+            let id = rand::random_vec(secure_random, 32)?;
+            let stored = config
+                .session_storage
+                .put(id.clone(), plain);
+            if !stored {
+                trace!("resumption not available; not issuing ticket");
+                return Ok(());
+            }
+            let stateful_lifetime = 24 * 60 * 60; // this is a bit of a punt
+            (id, stateful_lifetime)
+        };
+
+        let mut payload = NewSessionTicketPayloadTls13::new(lifetime, age_add, nonce, ticket);
+
+        if config.max_early_data_size > 0 {
+            if !stateless {
+                payload
+                    .exts
+                    .push(NewSessionTicketExtension::EarlyData(
+                        config.max_early_data_size,
+                    ));
+            } else {
+                // We implement RFC8446 section 8.1: by enforcing that 0-RTT is
+                // only possible if using stateful resumption
+                warn!("early_data with stateless resumption is not allowed");
+            }
+        }
+
+        let t = HandshakeMessagePayload {
+            typ: HandshakeType::NewSessionTicket,
+            payload: HandshakePayload::NewSessionTicketTls13(payload),
+        };
+        trace!("sending new ticket {:?} (stateless: {})", t, stateless);
+        flight.add(t);
+
+        Ok(())
+    }
+}
+impl State<ServerConnectionData> for ExpectClientFinished {
+    fn handle<'m>(
+        mut self: Box<Self>,
+        cx: &mut ServerContext<'_>,
+        m: Message<'m>,
+    ) -> hs::NextStateOrError<'m>
+    where
+        Self: 'm,
+    {
+        let finished =
+            require_handshake_msg!(m, HandshakeType::Finished, HandshakePayload::Finished)?;
+        self.transcript.add_message(&m);
+
+        let hs_hash = self.transcript.current_hash();
+        let expect_verify_data = self
+            .key_schedule
+            .sign_client_finish(&hs_hash);
+
+        if !bool::from(ConstantTimeEq::ct_eq(
+            expect_verify_data.as_ref(),
+            finished.bytes(),
+        )) {
+            return Err(cx
+                .common
+                .send_fatal_alert(AlertDescription::DecryptError, Error::DecryptError));
+        }
+
+        let key_schedule_traffic_pending_client_finished = self
+            .key_schedule
+            .into_traffic_with_client_finished_pending(
+                self.client_auth.as_deref(),
+                hs_hash,
+                &*self.config.key_log,
+                &self.randoms.client,
+                cx.common,
+            );
+
+        let (key_schedule_traffic, verify_data) = key_schedule_traffic_pending_client_finished
+            .sign_client_finish(&self.transcript.current_hash(), cx.common);
+
+        // server finished message
+
+        let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
+
+        flight.add(HandshakeMessagePayload {
+            typ: HandshakeType::Finished,
+            payload: HandshakePayload::Finished(Payload::new(verify_data.as_ref())),
+        });
+
+        flight.finish(cx.common);
+
+        if self.send_tickets > 0 {
+            let hs_hash = self.transcript.current_hash();
+            let resumption = ResumptionSecret::new(&key_schedule_traffic, &hs_hash);
+
+            let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
+            for _ in 0..self.send_tickets {
+                Self::emit_ticket(&mut flight, self.suite, cx, &resumption, &self.config)?;
+            }
+            flight.finish(cx.common);
+        }
+        // start app data
+
+        cx.common.check_aligned_handshake()?;
+        cx.common
+            .start_traffic(&mut cx.sendable_plaintext);
+
+        Ok(Box::new(ExpectTraffic {
+            key_schedule: key_schedule_traffic,
+            _fin_verified: verify::FinishedMessageVerified::assertion(),
+        }))
+    }
+
+    fn into_owned(self: Box<Self>) -> hs::NextState<'static> {
+        self
+    }
+}
 struct ExpectCertificateVerify {
     config: Arc<ServerConfig>,
     transcript: HandshakeHash,
