@@ -1,6 +1,6 @@
 use pki_types::CertificateDer;
 
-use crate::sign;
+use crate::{sign, sync::Arc};
 
 /// ActiveCertifiedKey wraps [`sign::CertifiedKey`] and tracks OSCP state in a single handshake.
 pub(super) struct ActiveCertifiedKey<'a> {
@@ -27,7 +27,14 @@ impl ActiveCertifiedKey<'_> {
     pub(super) fn get_key(&self) -> &dyn sign::SigningKey {
         &*self.key.key
     }
-
+    /// Get the kem key
+    #[inline]
+    pub(super) fn get_kem_key(&self) -> Arc<dyn sign::KemKey> {
+        self.key
+            .kem_key
+            .clone()
+            .expect("No KEM key found for active certified key")
+    }
     #[inline]
     pub(super) fn get_ocsp(&self) -> Option<&[u8]> {
         self.ocsp

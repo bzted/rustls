@@ -345,6 +345,7 @@ pub trait KeyProvider: Send + Sync + Debug {
         key_der: PrivateKeyDer<'static>,
     ) -> Result<Arc<dyn SigningKey>, Error>;
 
+    /// Decode and validate kem private key
     fn load_kem_private_key(
         &self,
         key_der: PrivateKeyDer<'static>,
