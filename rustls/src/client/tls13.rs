@@ -5,7 +5,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use aws_lc_rs::rsa::KeyPair;
 use oqs;
-use pki_types::ServerName;
+use pki_types::{CertificateDer, ServerName};
 use subtle::ConstantTimeEq;
 
 use super::client_conn::ClientConnectionData;
@@ -48,7 +48,7 @@ use crate::tls13::{
     construct_client_verify_message, construct_server_verify_message, Tls13CipherSuite,
 };
 use crate::verify::{self, DigitallySignedStruct};
-use crate::{compress, crypto, server, KeyLog, NamedGroup};
+use crate::{compress, crypto, server, x509, KeyLog, NamedGroup};
 
 // Extensions we expect in plaintext in the ServerHello.
 static ALLOWED_PLAINTEXT_EXTS: &[ExtensionType] = &[
@@ -493,10 +493,15 @@ fn handle_client_auth(
         }
     }
 }
-fn get_server_pk_from_cert(cert: &[u8]) -> Result<Vec<u8>, Error> {
-    Ok([0u8].to_vec())
-    // TODO
+fn get_server_pk_from_cert(cert: &CertificateDer<'_>) -> Result<Vec<u8>, Error> {
+    let (_, x509) = x509_parser::parse_x509_certificate(cert.as_ref())
+        .map_err(|_| Error::General("Failed to parse certificate".into()))?;
+
+    let pk = x509.public_key();
+
+    Ok(pk.subject_public_key.data.to_vec())
 }
+
 struct ExpectEncryptedExtensions {
     config: Arc<ClientConfig>,
     resuming_session: Option<persist::Tls13ClientSessionValue>,
