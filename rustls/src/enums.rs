@@ -72,7 +72,7 @@ enum_builder! {
         KeyUpdate => 0x18,
         CompressedCertificate => 0x19,
         MessageHash => 0xfe,
-        KemEncapsulation => 0xFF, // Added KemEncapsulation message
+        KemEncapsulation => 0x30, // Added KemEncapsulation message
     }
 }
 
