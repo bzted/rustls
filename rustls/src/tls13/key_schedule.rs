@@ -2,6 +2,7 @@
 
 use alloc::boxed::Box;
 use alloc::string::ToString;
+use log::debug;
 
 use crate::common_state::{CommonState, Side};
 use crate::crypto::cipher::{AeadKey, Iv, MessageDecrypter, Tls13AeadAlgorithm};
@@ -257,6 +258,12 @@ impl KeyScheduleHandshakeStart {
         common: &mut CommonState,
     ) -> KeyScheduleHandshake {
         // Use an empty handshake hash for the initial handshake.
+        debug!(
+            "SIDE:{:?} TRANSCRIPT HASH: {:02x?}",
+            common.side,
+            &hs_hash.as_ref()[..std::cmp::min(16, hs_hash.as_ref().len())]
+        );
+        debug!("DEBUG: Suite used: {:?}", self.ks.suite.common.suite);
         let client_secret = self.ks.derive_logged_secret(
             SecretKind::ClientHandshakeTrafficSecret,
             hs_hash.as_ref(),
@@ -376,58 +383,52 @@ impl KeyScheduleHandshake {
             .sign_finish(&self.client_handshake_traffic_secret, &handshake_hash);
         (KeyScheduleClientBeforeFinished { traffic }, tag)
     }
-    // Transition into authenticated handshake state using the server ss
+    // Transition into authenticated handshake state
     pub(crate) fn into_authenticated_handshake(
-        self,
+        mut self,
         server_ss: &[u8],
-        hs_hash: &hash::Output,
+        hs_hash: hash::Output,
         key_log: &dyn KeyLog,
         client_random: &[u8; 32],
         common: &mut CommonState,
     ) -> KeyScheduleAuthenticatedHandshake {
-        debug_assert!(
-            !server_ss.is_empty(),
-            "Server Shared Secret cannot be empty"
-        );
-        let derived_secret = self
-            .ks
-            .derive_for_empty_hash(SecretKind::DerivedSecret);
-        let mut ahs_ks = KeySchedule {
-            current: self
-                .ks
-                .suite
-                .hkdf_provider
-                .extract_from_secret(Some(derived_secret.as_ref()), server_ss),
-            suite: self.ks.suite,
-        };
-        let client_secret = ahs_ks.derive_logged_secret(
+        let this = &mut self.ks;
+
+        let derived_secret = this.derive_for_empty_hash(SecretKind::DerivedSecret);
+        this.current = this
+            .suite
+            .hkdf_provider
+            .extract_from_secret(Some(derived_secret.as_ref()), server_ss);
+
+        let client_secret = self.ks.derive_logged_secret(
             SecretKind::ClientHandshakeAuthenticatedTrafficSecret,
             hs_hash.as_ref(),
             key_log,
             client_random,
         );
-        let server_secret = ahs_ks.derive_logged_secret(
+        let server_secret = self.ks.derive_logged_secret(
             SecretKind::ServerHandshakeAuthenticatedTrafficSecret,
             hs_hash.as_ref(),
             key_log,
             client_random,
         );
+
         match common.side {
             Side::Client => {
-                ahs_ks.set_encrypter(&client_secret, common);
-                ahs_ks.set_decrypter(&server_secret, common);
+                self.ks
+                    .set_encrypter(&client_secret, common);
+                self.ks
+                    .set_decrypter(&server_secret, common);
             }
             Side::Server => {
-                ahs_ks.set_encrypter(&server_secret, common);
-                ahs_ks.set_decrypter(&client_secret, common);
+                self.ks
+                    .set_encrypter(&server_secret, common);
+                self.ks
+                    .set_decrypter(&client_secret, common);
             }
         }
 
-        KeyScheduleAuthenticatedHandshake {
-            ks: ahs_ks,
-            client_authenticated_handshake_traffic_secret: client_secret,
-            server_authenticated_handshake_traffic_secret: server_secret,
-        }
+        KeyScheduleAuthenticatedHandshake { ks: self.ks }
     }
 }
 
@@ -639,128 +640,134 @@ impl KeyScheduleTraffic {
         };
         Ok(PartiallyExtractedSecrets { tx, rx })
     }
-
-    pub(crate) fn client_finished_key(&self) -> OkmBlock {
-        hkdf_expand_label_block(self.ks.current.as_ref(), b"tls13 client finished", &[])
-    }
-    pub(crate) fn server_finished_key(&self) -> OkmBlock {
-        hkdf_expand_label_block(self.ks.current.as_ref(), b"tls13 server finished", &[])
-    }
-    pub(crate) fn sign_client_finish(&self, hs_hash: &hash::Output) -> hmac::Tag {
-        let finished_key = self.client_finished_key();
-        self.ks
-            .suite
-            .hkdf_provider
-            .hmac_sign(&finished_key, hs_hash.as_ref())
-    }
-    pub(crate) fn sign_server_finish(&self, hs_hash: &hash::Output) -> hmac::Tag {
-        let finished_key = self.server_finished_key();
-        self.ks
-            .suite
-            .hkdf_provider
-            .hmac_sign(&finished_key, hs_hash.as_ref())
-    }
-}
-
-pub(crate) struct KeyScheduleAuthenticatedHandshake {
-    ks: KeySchedule,
-    client_authenticated_handshake_traffic_secret: OkmBlock,
-    server_authenticated_handshake_traffic_secret: OkmBlock,
-}
-
-impl KeyScheduleAuthenticatedHandshake {
-    fn derive_main_secret(&self, client_ss: Option<&[u8]>) -> KeySchedule {
-        let derived_secret = self
-            .ks
-            .derive_for_empty_hash(SecretKind::DerivedSecret);
-
-        // Input keying material - zero if no client auth
-        let ikm = client_ss.unwrap_or(&[0u8; 32]);
-
-        KeySchedule {
-            current: self
-                .ks
-                .suite
-                .hkdf_provider
-                .extract_from_secret(Some(derived_secret.as_ref()), ikm),
-            suite: self.ks.suite,
-        }
-    }
-
-    pub(crate) fn into_pre_finished_client_traffic(
-        self,
-        client_ss: Option<&[u8]>,
-        pre_finished_hash: hash::Output,
+    /// Used for Authkem
+    /// Injects a shared secret if client auth was required
+    pub(crate) fn new_authkem(
+        ks: KeySchedule,
+        current_client_traffic_secret: OkmBlock,
+        current_server_traffic_secret: OkmBlock,
         hs_hash: hash::Output,
         key_log: &dyn KeyLog,
         client_random: &[u8; 32],
-    ) -> (KeyScheduleClientBeforeFinished, hmac::Tag) {
-        let mut ms_ks = self.derive_main_secret(client_ss);
-
-        let traffic = KeyScheduleTraffic::new(ms_ks, pre_finished_hash, key_log, client_random);
-
-        let tag = traffic.sign_client_finish(&hs_hash);
-
-        (KeyScheduleClientBeforeFinished { traffic }, tag)
-    }
-
-    pub(crate) fn into_traffic_with_client_finished_pending(
-        self,
-        client_ss: Option<&[u8]>,
-        hs_hash: hash::Output,
-        key_log: &dyn KeyLog,
-        client_random: &[u8; 32],
-        common: &mut CommonState,
-    ) -> KeyScheduleTrafficWithClientFinishedPending {
-        debug_assert_eq!(common.side, Side::Server);
-
-        let mut ms_ks = self.derive_main_secret(client_ss);
-
-        let client_application_traffic_secret = ms_ks.derive_logged_secret(
-            SecretKind::ClientApplicationTrafficSecret,
-            hs_hash.as_ref(),
-            key_log,
-            client_random,
-        );
-
-        let server_application_traffic_secret = ms_ks.derive_logged_secret(
-            SecretKind::ServerApplicationTrafficSecret,
-            hs_hash.as_ref(),
-            key_log,
-            client_random,
-        );
-
-        let exporter_secret = ms_ks.derive_logged_secret(
+    ) -> Self {
+        let current_exporter_secret = ks.derive_logged_secret(
             SecretKind::ExporterMasterSecret,
             hs_hash.as_ref(),
             key_log,
             client_random,
         );
 
-        let traffic = KeyScheduleTraffic {
-            ks: ms_ks,
-            current_client_traffic_secret: client_application_traffic_secret,
-            current_server_traffic_secret: server_application_traffic_secret,
-            current_exporter_secret: exporter_secret,
-        };
-
-        traffic
-            .ks
-            .set_encrypter(&traffic.current_client_traffic_secret, common);
-
-        KeyScheduleTrafficWithClientFinishedPending {
-            handshake_client_traffic_secret: self.client_authenticated_handshake_traffic_secret,
-            traffic,
+        Self {
+            ks,
+            current_client_traffic_secret,
+            current_server_traffic_secret,
+            current_exporter_secret,
         }
     }
+}
+
+pub(crate) struct KeyScheduleAuthenticatedHandshake {
+    ks: KeySchedule,
+}
+
+impl KeyScheduleAuthenticatedHandshake {
+    pub(crate) fn into_main_secret(mut self, client_ss: Option<&[u8]>) -> KeyScheduleMainSecret {
+        if let Some(client_ss) = client_ss {
+            self.ks.input_secret(client_ss);
+        } else {
+            self.ks.input_empty();
+        }
+
+        KeyScheduleMainSecret { ks: self.ks }
+    }
+}
+
+pub(crate) struct KeyScheduleMainSecret {
+    ks: KeySchedule,
+}
+
+impl KeyScheduleMainSecret {
     pub(crate) fn sign_client_finish(&self, hs_hash: &hash::Output) -> hmac::Tag {
-        self.ks
-            .sign_finish(&self.client_authenticated_handshake_traffic_secret, hs_hash)
+        let hmac_key = hkdf_expand_label_block(&*self.ks.current, b"c finished", &[]);
+        self.ks.sign_finish(&hmac_key, hs_hash)
     }
 
+    pub(crate) fn into_client_traffic(
+        self,
+        hs_hash: hash::Output,
+        key_log: &dyn KeyLog,
+        client_random: &[u8; 32],
+        side: Side,
+        common: &mut CommonState,
+    ) -> KeyScheduleClientTraffic {
+        let current_client_traffic_secret = self.ks.derive_logged_secret(
+            SecretKind::ClientApplicationTrafficSecret,
+            hs_hash.as_ref(),
+            key_log,
+            client_random,
+        );
+
+        match side {
+            Side::Client => self
+                .ks
+                .set_encrypter(&current_client_traffic_secret, common),
+            Side::Server => self
+                .ks
+                .set_decrypter(&current_client_traffic_secret, common),
+        };
+
+        KeyScheduleClientTraffic {
+            ks: self.ks,
+            current_client_traffic_secret,
+        }
+    }
+}
+
+pub(crate) struct KeyScheduleClientTraffic {
+    ks: KeySchedule,
+    current_client_traffic_secret: OkmBlock,
+}
+
+impl KeyScheduleClientTraffic {
     pub(crate) fn sign_server_finish(&self, hs_hash: &hash::Output) -> hmac::Tag {
-        self.ks
-            .sign_finish(&self.server_authenticated_handshake_traffic_secret, hs_hash)
+        let hmac_key = hkdf_expand_label_block(&*self.ks.current, b"s finished", &[]);
+        self.ks.sign_finish(&hmac_key, hs_hash)
+    }
+
+    pub(crate) fn into_traffic(
+        self,
+        hs_hash: hash::Output,
+        side: Side,
+        common: &mut CommonState,
+        key_log: &dyn KeyLog,
+        client_random: &[u8; 32],
+    ) -> KeyScheduleTraffic {
+        let current_server_traffic_secret = self.ks.derive_logged_secret(
+            SecretKind::ServerApplicationTrafficSecret,
+            hs_hash.as_ref(),
+            key_log,
+            client_random,
+        );
+
+        match side {
+            Side::Client => {
+                self.ks
+                    .set_decrypter(&current_server_traffic_secret, common);
+            }
+            Side::Server => {
+                self.ks
+                    .set_encrypter(&current_server_traffic_secret, common);
+            }
+        };
+
+        KeyScheduleTraffic::new_authkem(
+            self.ks,
+            self.current_client_traffic_secret,
+            current_server_traffic_secret,
+            hs_hash,
+            key_log,
+            client_random,
+        )
     }
 }
 pub(crate) struct ResumptionSecret<'a> {
@@ -866,6 +873,12 @@ impl KeySchedule {
         key_log: &dyn KeyLog,
         client_random: &[u8; 32],
     ) -> OkmBlock {
+        debug!(
+            "DERIVE SECRET:{:?} HASH: {:02x?} SUITE:{:?}",
+            kind,
+            &hs_hash[..core::cmp::min(8, hs_hash.len())],
+            self.suite.common.suite
+        );
         let output = self.derive(kind, hs_hash);
 
         let log_label = kind
