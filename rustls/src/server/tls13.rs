@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 pub(super) use client_hello::CompleteClientHelloHandling;
 use pki_types::{CertificateDer, UnixTime};
 use subtle::ConstantTimeEq;
+use x509_parser::der_parser::rusticata_macros::debug;
 
 use super::hs::{self, HandshakeHashOrBuffer, ServerContext};
 use super::server_conn::ServerConnectionData;
@@ -32,8 +33,8 @@ use crate::server::ServerConfig;
 use crate::suites::PartiallyExtractedSecrets;
 use crate::sync::Arc;
 use crate::tls13::key_schedule::{
-    self, KeyScheduleAuthenticatedHandshake, KeyScheduleHandshake, KeyScheduleTraffic,
-    KeyScheduleTrafficWithClientFinishedPending, ResumptionSecret,
+    self, KeyScheduleAuthenticatedHandshake, KeyScheduleHandshake, KeyScheduleMainSecret,
+    KeyScheduleTraffic, KeyScheduleTrafficWithClientFinishedPending, ResumptionSecret,
 };
 use crate::tls13::{
     construct_client_verify_message, construct_server_verify_message, Tls13CipherSuite,
@@ -375,7 +376,7 @@ mod client_hello {
                 &self.config,
             )?;
 
-            let doing_client_auth = if full_handshake {
+            let (server_kem_key, doing_client_auth) = if full_handshake {
                 let client_auth = emit_certificate_req_tls13(&mut flight, &self.config)?;
 
                 if let Some(compressor) = cert_compressor {
@@ -389,31 +390,19 @@ mod client_hello {
                 } else {
                     emit_certificate_tls13(&mut flight, server_key.get_cert(), ocsp_response);
                 }
-                flight.finish(cx.common);
                 let server_kem_key = server_key.get_kem_key();
 
-                return Ok(Box::new(ExpectClientKemEncapsulation {
-                    config: Arc::clone(&self.config),
-                    transcript: self.transcript,
-                    key_schedule,
-                    randoms: self.randoms,
-                    suite: self.suite,
-                    client_auth,
-                    server_cert: CertificateChain(server_key.get_cert().to_vec()),
-                    server_key: server_kem_key,
-                    send_tickets: self.send_tickets,
-                }));
-                /*
-                emit_certificate_verify_tls13(
-                    &mut flight,
-                    cx.common,
-                    server_key.get_key(),
-                    &sigschemes_ext,
-                )?;
-                client_auth
-                */
+                if server_kem_key.is_none() {
+                    emit_certificate_verify_tls13(
+                        &mut flight,
+                        cx.common,
+                        server_key.get_key(),
+                        &sigschemes_ext,
+                    )?;
+                }
+                (server_kem_key, client_auth)
             } else {
-                false
+                (None, false)
             };
 
             // If we're not doing early data, then the next messages we receive
@@ -440,34 +429,69 @@ mod client_hello {
                 }
             }
 
-            cx.common.check_aligned_handshake()?;
-            let key_schedule_traffic =
-                emit_finished_tls13(flight, &self.randoms, cx, key_schedule, &self.config);
+            if let Some(server_kem_key) = server_kem_key {
+                debug!("SERVER GOING INTO EXPECT CLIENT KEM ENCAPS");
+                flight.finish(cx.common);
+                Ok(Box::new(ExpectClientKemEncapsulation {
+                    config: Arc::clone(&self.config),
+                    transcript: self.transcript,
+                    key_schedule,
+                    randoms: self.randoms,
+                    suite: self.suite,
+                    client_auth: doing_client_auth,
+                    server_cert: CertificateChain(server_key.get_cert().to_vec()),
+                    server_key: server_kem_key,
+                    send_tickets: self.send_tickets,
+                }))
+            } else {
+                cx.common.check_aligned_handshake()?;
+                let key_schedule_traffic =
+                    emit_finished_tls13(flight, &self.randoms, cx, key_schedule, &self.config);
 
-            if !doing_client_auth && self.config.send_half_rtt_data {
-                // Application data can be sent immediately after Finished, in one
-                // flight.  However, if client auth is enabled, we don't want to send
-                // application data to an unauthenticated peer.
-                cx.common
-                    .start_outgoing_traffic(&mut cx.sendable_plaintext);
-            }
+                if !doing_client_auth && self.config.send_half_rtt_data {
+                    // Application data can be sent immediately after Finished, in one
+                    // flight.  However, if client auth is enabled, we don't want to send
+                    // application data to an unauthenticated peer.
+                    cx.common
+                        .start_outgoing_traffic(&mut cx.sendable_plaintext);
+                }
 
-            if doing_client_auth {
-                if self
-                    .config
-                    .cert_decompressors
-                    .is_empty()
-                {
-                    Ok(Box::new(ExpectCertificate {
+                if doing_client_auth {
+                    if self
+                        .config
+                        .cert_decompressors
+                        .is_empty()
+                    {
+                        Ok(Box::new(ExpectCertificate {
+                            config: self.config,
+                            transcript: self.transcript,
+                            suite: self.suite,
+                            key_schedule: key_schedule_traffic,
+                            send_tickets: self.send_tickets,
+                            message_already_in_transcript: false,
+                        }))
+                    } else {
+                        Ok(Box::new(ExpectCertificateOrCompressedCertificate {
+                            config: self.config,
+                            transcript: self.transcript,
+                            suite: self.suite,
+                            key_schedule: key_schedule_traffic,
+                            send_tickets: self.send_tickets,
+                        }))
+                    }
+                } else if doing_early_data == EarlyDataDecision::Accepted && !cx.common.is_quic() {
+                    // Not used for QUIC: RFC 9001 §8.3: Clients MUST NOT send the EndOfEarlyData
+                    // message. A server MUST treat receipt of a CRYPTO frame in a 0-RTT packet as a
+                    // connection error of type PROTOCOL_VIOLATION.
+                    Ok(Box::new(ExpectEarlyData {
                         config: self.config,
                         transcript: self.transcript,
                         suite: self.suite,
                         key_schedule: key_schedule_traffic,
                         send_tickets: self.send_tickets,
-                        message_already_in_transcript: false,
                     }))
                 } else {
-                    Ok(Box::new(ExpectCertificateOrCompressedCertificate {
+                    Ok(Box::new(ExpectFinished {
                         config: self.config,
                         transcript: self.transcript,
                         suite: self.suite,
@@ -475,25 +499,6 @@ mod client_hello {
                         send_tickets: self.send_tickets,
                     }))
                 }
-            } else if doing_early_data == EarlyDataDecision::Accepted && !cx.common.is_quic() {
-                // Not used for QUIC: RFC 9001 §8.3: Clients MUST NOT send the EndOfEarlyData
-                // message. A server MUST treat receipt of a CRYPTO frame in a 0-RTT packet as a
-                // connection error of type PROTOCOL_VIOLATION.
-                Ok(Box::new(ExpectEarlyData {
-                    config: self.config,
-                    transcript: self.transcript,
-                    suite: self.suite,
-                    key_schedule: key_schedule_traffic,
-                    send_tickets: self.send_tickets,
-                }))
-            } else {
-                Ok(Box::new(ExpectFinished {
-                    config: self.config,
-                    transcript: self.transcript,
-                    suite: self.suite,
-                    key_schedule: key_schedule_traffic,
-                    send_tickets: self.send_tickets,
-                }))
             }
         }
     }
@@ -887,12 +892,16 @@ fn encapsulate(algorithm: NamedGroup, server_pk: &[u8]) -> Result<(Vec<u8>, Vec<
 }
 
 fn get_client_pk_from_cert(cert: &CertificateDer<'_>) -> Result<Vec<u8>, Error> {
-    let (_, x509) = x509_parser::parse_x509_certificate(cert.as_ref())
-        .map_err(|_| Error::General("Failed to parse certificate".into()))?;
-
-    let pk = x509.public_key();
-
-    Ok(pk.subject_public_key.data.to_vec())
+    match x509_parser::parse_x509_certificate(cert.as_ref()) {
+        Ok((_, x509)) => {
+            let pk = x509.public_key();
+            Ok(pk.subject_public_key.data.to_vec())
+        }
+        Err(_) => {
+            //Si en vez de certificado enviamos raw pk
+            Ok(cert.as_ref().to_vec())
+        }
+    }
 }
 struct ExpectAndSkipRejectedEarlyData {
     skip_data_left: usize,
@@ -1202,23 +1211,22 @@ impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
             HandshakePayload::KemEncapsulation
         )?;
 
-        self.transcript.add_message(&m);
-
         let server_ss = self
             .server_key
             .decapsulate(client_kem.ciphertext.0.as_ref())?;
 
-        let hs_hash = self.transcript.current_hash();
+        self.transcript.add_message(&m);
 
         let auth_handhsake_key_schedule = self
             .key_schedule
             .into_authenticated_handshake(
                 &server_ss,
-                &hs_hash,
+                self.transcript.current_hash(),
                 &*self.config.key_log,
                 &self.randoms.client,
                 cx.common,
-            );
+            )
+            .into_main_secret(None);
         if self.client_auth {
             Ok(Box::new(ExpectCertificateForClientAuth {
                 config: self.config,
@@ -1251,7 +1259,7 @@ struct ExpectCertificateForClientAuth {
     config: Arc<ServerConfig>,
     transcript: HandshakeHash,
     suite: &'static Tls13CipherSuite,
-    key_schedule: KeyScheduleAuthenticatedHandshake,
+    key_schedule: KeyScheduleMainSecret,
     randoms: ConnectionRandoms,
     server_cert: CertificateChain<'static>,
     send_tickets: usize,
@@ -1351,7 +1359,7 @@ struct ExpectClientFinished {
     config: Arc<ServerConfig>,
     transcript: HandshakeHash,
     suite: &'static Tls13CipherSuite,
-    key_schedule: KeyScheduleAuthenticatedHandshake,
+    key_schedule: KeyScheduleMainSecret,
     randoms: ConnectionRandoms,
     client_auth: Option<Vec<u8>>,
     send_tickets: usize,
@@ -1429,46 +1437,51 @@ impl State<ServerConnectionData> for ExpectClientFinished {
     {
         let finished =
             require_handshake_msg!(m, HandshakeType::Finished, HandshakePayload::Finished)?;
-        self.transcript.add_message(&m);
 
         let hs_hash = self.transcript.current_hash();
         let expect_verify_data = self
             .key_schedule
             .sign_client_finish(&hs_hash);
 
-        if !bool::from(ConstantTimeEq::ct_eq(
-            expect_verify_data.as_ref(),
-            finished.bytes(),
-        )) {
-            return Err(cx
-                .common
-                .send_fatal_alert(AlertDescription::DecryptError, Error::DecryptError));
-        }
+        let fin = match ConstantTimeEq::ct_eq(expect_verify_data.as_ref(), finished.bytes()).into()
+        {
+            true => verify::FinishedMessageVerified::assertion(),
+            false => {
+                return Err(cx
+                    .common
+                    .send_fatal_alert(AlertDescription::DecryptError, Error::DecryptError))
+            }
+        };
+        self.transcript.add_message(&m);
+        cx.common.check_aligned_handshake()?;
 
-        let key_schedule_traffic_pending_client_finished = self
-            .key_schedule
-            .into_traffic_with_client_finished_pending(
-                self.client_auth.as_deref(),
-                hs_hash,
-                &*self.config.key_log,
-                &self.randoms.client,
-                cx.common,
-            );
-
-        let (key_schedule_traffic, verify_data) = key_schedule_traffic_pending_client_finished
-            .sign_client_finish(&self.transcript.current_hash(), cx.common);
+        let key_schedule = self.key_schedule.into_client_traffic(
+            self.transcript.current_hash(),
+            &*self.config.key_log,
+            &self.randoms.client,
+            Side::Server,
+            cx.common,
+        );
 
         // server finished message
-
+        let hs_hash = self.transcript.current_hash();
+        let verify_data = key_schedule.sign_server_finish(&hs_hash);
+        debug!("Server about to send finished message");
         let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
 
         flight.add(HandshakeMessagePayload {
             typ: HandshakeType::Finished,
             payload: HandshakePayload::Finished(Payload::new(verify_data.as_ref())),
         });
-
         flight.finish(cx.common);
 
+        let key_schedule_traffic = key_schedule.into_traffic(
+            self.transcript.current_hash(),
+            Side::Server,
+            cx.common,
+            &*self.config.key_log,
+            &self.randoms.client,
+        );
         if self.send_tickets > 0 {
             let hs_hash = self.transcript.current_hash();
             let resumption = ResumptionSecret::new(&key_schedule_traffic, &hs_hash);
@@ -1480,14 +1493,12 @@ impl State<ServerConnectionData> for ExpectClientFinished {
             flight.finish(cx.common);
         }
         // start app data
-
-        cx.common.check_aligned_handshake()?;
         cx.common
             .start_traffic(&mut cx.sendable_plaintext);
 
         Ok(Box::new(ExpectTraffic {
             key_schedule: key_schedule_traffic,
-            _fin_verified: verify::FinishedMessageVerified::assertion(),
+            _fin_verified: fin,
         }))
     }
 
