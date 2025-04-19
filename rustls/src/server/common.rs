@@ -29,11 +29,8 @@ impl ActiveCertifiedKey<'_> {
     }
     /// Get the kem key
     #[inline]
-    pub(super) fn get_kem_key(&self) -> Arc<dyn sign::KemKey> {
-        self.key
-            .kem_key
-            .clone()
-            .expect("No KEM key found for active certified key")
+    pub(super) fn get_kem_key(&self) -> Option<Arc<dyn sign::KemKey>> {
+        self.key.kem_key.clone()
     }
     #[inline]
     pub(super) fn get_ocsp(&self) -> Option<&[u8]> {

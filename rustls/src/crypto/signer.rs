@@ -146,7 +146,7 @@ pub struct CertifiedKey {
     /// An optional OCSP response from the certificate issuer,
     /// attesting to its continued validity.
     pub ocsp: Option<Vec<u8>>,
-
+    /// KemKey, if available.
     pub kem_key: Option<Arc<dyn KemKey>>,
 }
 
@@ -207,6 +207,10 @@ impl CertifiedKey {
         self.cert
             .first()
             .ok_or(Error::NoCertificatesPresented)
+    }
+    /// Gets the KemKey, if available.
+    pub fn get_kem_key(&self) -> Option<Arc<dyn KemKey>> {
+        self.kem_key.clone()
     }
 }
 

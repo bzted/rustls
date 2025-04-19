@@ -320,9 +320,9 @@ pub struct KemEncapsulationPayload {
 }
 
 impl KemEncapsulationPayload {
-    pub fn new(certificate_req_context: Vec<u8>, ciphertext: Vec<u8>) -> Self {
+    pub(crate) fn new(ciphertext: Vec<u8>) -> Self {
         Self {
-            certificate_req_context: PayloadU8::new(certificate_req_context),
+            certificate_req_context: PayloadU8::empty(),
             ciphertext: PayloadU16::new(ciphertext),
         }
     }
@@ -336,12 +336,9 @@ impl Codec<'_> for KemEncapsulationPayload {
     }
 
     fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
-        let certificate_req_context = PayloadU8::read(r)?;
-        let ciphertext = PayloadU16::read(r)?;
-
         Ok(Self {
-            certificate_req_context,
-            ciphertext,
+            certificate_req_context: PayloadU8::read(r)?,
+            ciphertext: PayloadU16::read(r)?,
         })
     }
 }
