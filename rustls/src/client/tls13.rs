@@ -462,7 +462,7 @@ fn encapsulate(algorithm: NamedGroup, server_pk: &[u8]) -> Result<(Vec<u8>, Vec<
     Ok((ct.as_ref().to_vec(), ss.as_ref().to_vec()))
 }
 fn handle_client_auth(
-    flight: &mut HandshakeFlightTls13,
+    flight: &mut HandshakeFlightTls13<'_>,
     client_auth: &ClientAuthDetails,
     config: &ClientConfig,
 ) {
@@ -487,6 +487,7 @@ fn handle_client_auth(
             } else {
                 emit_certificate_tls13(flight, Some(&certkey), auth_context_tls13.clone());
             }
+            debug!("Client sent his certificate");
         }
     }
 }
@@ -1158,7 +1159,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
         let algorithm = kx_group.name();
 
         if algorithm == NamedGroup::MLKEM768 {
-            let (leaf_cert, ca_certs) = server_cert
+            let (leaf_cert, _ca_certs) = server_cert
                 .cert_chain
                 .split_first()
                 .ok_or(Error::NoCertificatesPresented)?;
@@ -1176,9 +1177,6 @@ impl State<ClientConnectionData> for ExpectCertificate {
             debug!("Client sending KemEncapsulation message");
 
             let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
-            if let Some(client_auth) = self.client_auth.as_ref() {
-                handle_client_auth(&mut flight, client_auth, &self.config);
-            }
 
             flight.add(HandshakeMessagePayload {
                 typ: HandshakeType::KemEncapsulation,
@@ -1199,7 +1197,11 @@ impl State<ClientConnectionData> for ExpectCertificate {
                     cx.common,
                 );
 
-            if let Some(ClientAuthDetails::Verify { .. }) = &self.client_auth {
+            if let Some(client_auth) = &self.client_auth {
+                let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
+                handle_client_auth(&mut flight, client_auth, &self.config);
+                flight.finish(cx.common);
+
                 Ok(Box::new(ExpectServerKemEncapsulation {
                     config: self.config,
                     server_name: self.server_name,

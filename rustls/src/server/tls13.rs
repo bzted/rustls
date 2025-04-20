@@ -1225,8 +1225,8 @@ impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
                 &*self.config.key_log,
                 &self.randoms.client,
                 cx.common,
-            )
-            .into_main_secret(None);
+            );
+
         if self.client_auth {
             Ok(Box::new(ExpectCertificateForClientAuth {
                 config: self.config,
@@ -1238,11 +1238,12 @@ impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
                 send_tickets: self.send_tickets,
             }))
         } else {
+            let key_schedule = auth_handhsake_key_schedule.into_main_secret(None);
             Ok(Box::new(ExpectClientFinished {
                 config: self.config,
                 transcript: self.transcript,
                 suite: self.suite,
-                key_schedule: auth_handhsake_key_schedule,
+                key_schedule: key_schedule,
                 randoms: self.randoms,
                 client_auth: None,
                 send_tickets: self.send_tickets,
@@ -1259,7 +1260,7 @@ struct ExpectCertificateForClientAuth {
     config: Arc<ServerConfig>,
     transcript: HandshakeHash,
     suite: &'static Tls13CipherSuite,
-    key_schedule: KeyScheduleMainSecret,
+    key_schedule: KeyScheduleAuthenticatedHandshake,
     randoms: ConnectionRandoms,
     server_cert: CertificateChain<'static>,
     send_tickets: usize,
@@ -1290,12 +1291,13 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
             {
                 return Err(Error::NoCertificatesPresented);
             }
+            let key_schedule = self.key_schedule.into_main_secret(None);
 
             return Ok(Box::new(ExpectClientFinished {
                 config: self.config,
                 transcript: self.transcript,
                 suite: self.suite,
-                key_schedule: self.key_schedule,
+                key_schedule,
                 randoms: self.randoms,
                 client_auth: None,
                 send_tickets: self.send_tickets,
@@ -1337,13 +1339,17 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
 
         flight.finish(cx.common);
 
+        let key_schedule = self
+            .key_schedule
+            .into_main_secret(Some(&client_ss));
+
         cx.common.peer_certificates = Some(owned_chain.clone());
 
         Ok(Box::new(ExpectClientFinished {
             config: self.config,
             transcript: self.transcript,
             suite: self.suite,
-            key_schedule: self.key_schedule,
+            key_schedule,
             randoms: self.randoms,
             client_auth: Some(client_ss),
             send_tickets: self.send_tickets,
