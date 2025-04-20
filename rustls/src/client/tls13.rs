@@ -1,8 +1,6 @@
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use aws_lc_rs::rsa::KeyPair;
-use oqs;
 use pki_types::{CertificateDer, ServerName};
 use subtle::ConstantTimeEq;
 
@@ -442,25 +440,6 @@ fn validate_encrypted_extensions(
     Ok(())
 }
 
-fn encapsulate(algorithm: NamedGroup, server_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
-    debug!("Encapsulating to servers pk");
-    let kem: oqs::kem::Kem = match algorithm {
-        NamedGroup::MLKEM512 => oqs::kem::Kem::new(oqs::kem::Algorithm::MlKem512),
-        NamedGroup::MLKEM768 => oqs::kem::Kem::new(oqs::kem::Algorithm::MlKem768),
-        NamedGroup::MLKEM1024 => oqs::kem::Kem::new(oqs::kem::Algorithm::MlKem1024),
-        _ => return Err(Error::General("Unsupported KEM algorithm".into())),
-    }
-    .map_err(|_| Error::General("Failed to create KEM instance".into()))?;
-
-    let pk = kem
-        .public_key_from_bytes(server_pk)
-        .ok_or_else(|| Error::General("Invalid public key".into()))?;
-    let (ct, ss) = kem
-        .encapsulate(pk)
-        .map_err(|_| Error::General("Encapsulation failed".into()))?;
-
-    Ok((ct.as_ref().to_vec(), ss.as_ref().to_vec()))
-}
 fn handle_client_auth(
     flight: &mut HandshakeFlightTls13<'_>,
     client_auth: &ClientAuthDetails,
@@ -1152,13 +1131,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
             end_entity_ocsp,
         );
 
-        let kx_group = cx
-            .common
-            .negotiated_key_exchange_group()
-            .expect("Negotiated Kx Group not found");
-        let algorithm = kx_group.name();
-
-        if algorithm == NamedGroup::MLKEM768 {
+        if self.config.verifier.authkem() {
             let (leaf_cert, _ca_certs) = server_cert
                 .cert_chain
                 .split_first()
@@ -1168,7 +1141,10 @@ impl State<ClientConnectionData> for ExpectCertificate {
             let server_pk = get_server_pk_from_cert(leaf_cert)?; //get server public key from certificate
 
             // encapsulate to server public key
-            let (ct, server_ss) = encapsulate(algorithm, &server_pk)?;
+            let (ct, server_ss) = self
+                .config
+                .verifier
+                .encapsulate(&server_pk)?;
             debug!(
                 "CLIENT ENCAPSULATION RESULT: ct={} bytes, ss={} bytes",
                 ct.clone().len(),

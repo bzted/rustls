@@ -152,6 +152,18 @@ pub trait ServerCertVerifier: Debug + Send + Sync {
     fn root_hint_subjects(&self) -> Option<&[DistinguishedName]> {
         None
     }
+
+    /// Returns if we are using authkem flow
+    fn authkem(&self) -> bool {
+        false
+    }
+
+    /// Encapsulates to the servers public key
+    /// Method only useful if we are using the authkem flow
+    fn encapsulate(&self, server_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
+        // Empty by default
+        Ok((Vec::new(), Vec::new()))
+    }
 }
 
 /// Something that can verify a client certificate chain
@@ -270,6 +282,18 @@ pub trait ClientCertVerifier: Debug + Send + Sync {
     /// in [RFC 7250](https://tools.ietf.org/html/rfc7250).
     fn requires_raw_public_keys(&self) -> bool {
         false
+    }
+
+    /// Returns if we are using authkem flow
+    fn authkem(&self) -> bool {
+        false
+    }
+
+    /// Encapsulates to the clients public key
+    /// Method only useful if we are using the authkem flow
+    fn encapsulate(&self, client_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
+        // Empty by default
+        Ok((Vec::new(), Vec::new()))
     }
 }
 

@@ -872,25 +872,6 @@ mod client_hello {
     }
 }
 
-fn encapsulate(algorithm: NamedGroup, server_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
-    let kem: oqs::kem::Kem = match algorithm {
-        NamedGroup::MLKEM512 => oqs::kem::Kem::new(oqs::kem::Algorithm::MlKem512),
-        NamedGroup::MLKEM768 => oqs::kem::Kem::new(oqs::kem::Algorithm::MlKem768),
-        NamedGroup::MLKEM1024 => oqs::kem::Kem::new(oqs::kem::Algorithm::MlKem1024),
-        _ => return Err(Error::General("Unsupported KEM algorithm".into())),
-    }
-    .map_err(|_| Error::General("Failed to create KEM instance".into()))?;
-
-    let pk = kem
-        .public_key_from_bytes(server_pk)
-        .ok_or_else(|| Error::General("Invalid public key".into()))?;
-    let (ct, ss) = kem
-        .encapsulate(&pk)
-        .map_err(|_| Error::General("Encapsulation failed".into()))?;
-
-    Ok((ct.as_ref().to_vec(), ss.as_ref().to_vec()))
-}
-
 fn get_client_pk_from_cert(cert: &CertificateDer<'_>) -> Result<Vec<u8>, Error> {
     match x509_parser::parse_x509_certificate(cert.as_ref()) {
         Ok((_, x509)) => {
@@ -1312,20 +1293,14 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
             .ok_or(Error::NoCertificatesPresented)?;
 
         let now = self.config.current_time()?;
-        self.config
-            .verifier
-            .verify_client_cert(leaf_cert, ca_certs, now)?;
 
         let client_pk = get_client_pk_from_cert(leaf_cert)?;
 
-        let kx_group = cx
-            .common
-            .negotiated_key_exchange_group()
-            .expect("Negotiated Kx Group not found");
-        let algorithm = kx_group.name();
-
         // encapsulate to client public key
-        let (ct, client_ss) = encapsulate(algorithm, &client_pk)?;
+        let (ct, client_ss) = self
+            .config
+            .verifier
+            .encapsulate(&client_pk)?;
 
         let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
 
