@@ -73,9 +73,11 @@ pub trait SigningKey: Debug + Send + Sync {
     /// What kind of key we have.
     fn algorithm(&self) -> SignatureAlgorithm;
 }
-
+/// A thing that can decapsulate a ciphertext
 pub trait KemKey: Send + Sync + Debug {
+    /// Method to decapsulate peers ciphertext
     fn decapsulate(&self, ciphertext: &[u8]) -> Result<Vec<u8>, Error>;
+    /// Algorithm of the key used to decapsulate
     fn algorithm(&self) -> NamedGroup;
 }
 
