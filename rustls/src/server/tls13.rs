@@ -1243,7 +1243,7 @@ impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
                 config: self.config,
                 transcript: self.transcript,
                 suite: self.suite,
-                key_schedule: key_schedule,
+                key_schedule,
                 randoms: self.randoms,
                 client_auth: None,
                 send_tickets: self.send_tickets,
