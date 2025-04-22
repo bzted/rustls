@@ -1,7 +1,6 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt::Debug;
-use signer::KemKey;
 
 use pki_types::PrivateKeyDer;
 use zeroize::Zeroize;
@@ -344,16 +343,6 @@ pub trait KeyProvider: Send + Sync + Debug {
         &self,
         key_der: PrivateKeyDer<'static>,
     ) -> Result<Arc<dyn SigningKey>, Error>;
-
-    /// Decode and validate kem private key
-    fn load_kem_private_key(
-        &self,
-        key_der: PrivateKeyDer<'static>,
-        algorithm: NamedGroup,
-    ) -> Result<Arc<dyn KemKey>, Error> {
-        Err(Error::General("KEM Keys not supported".into()))
-    }
-
     /// Return `true` if this is backed by a FIPS-approved implementation.
     ///
     /// If this returns `true`, that must be the case for all possible key types
