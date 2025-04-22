@@ -514,10 +514,6 @@ enum_builder! {
         RSA_PSS_SHA512 => 0x0806,
         ED25519 => 0x0807,
         ED448 => 0x0808,
-        MLKEM512 => 0xfcfc,
-        MLKEM768 => 0xfbfb,
-        MLKEM1024 => 0xfafa,
-
     }
 }
 
@@ -537,7 +533,6 @@ impl SignatureScheme {
             | Self::ECDSA_NISTP521_SHA512 => SignatureAlgorithm::ECDSA,
             Self::ED25519 => SignatureAlgorithm::ED25519,
             Self::ED448 => SignatureAlgorithm::ED448,
-            Self::MLKEM512 | Self::MLKEM768 | Self::MLKEM1024 => SignatureAlgorithm::KEM,
             _ => SignatureAlgorithm::Unknown(0),
         }
     }
@@ -559,9 +554,6 @@ impl SignatureScheme {
                 | Self::RSA_PSS_SHA384
                 | Self::RSA_PSS_SHA256
                 | Self::ED25519
-                | Self::MLKEM512
-                | Self::MLKEM768
-                | Self::MLKEM1024
         )
     }
 }
@@ -578,7 +570,6 @@ enum_builder! {
         ECDSA => 0x03,
         ED25519 => 0x07,
         ED448 => 0x08,
-        KEM => 0x0f,
     }
 }
 
