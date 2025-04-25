@@ -22,6 +22,8 @@ members = [
   "rustls-provider-test",
   # rustls cryptography provider for fuzzing
   "rustls-fuzzing-provider",
+  # kemtls custom provider
+  "kemtls_provider",
 ]
 
 ## Deliberately not included in `members`:
