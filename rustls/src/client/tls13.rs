@@ -202,7 +202,6 @@ pub(super) fn handle_server_hello(
         cx.common,
     );
     emit_fake_ccs(&mut sent_tls13_fake_ccs, cx.common);
-    debug!("CLIENT EMMITED FAKE CCS");
     Ok(Box::new(ExpectEncryptedExtensions {
         config,
         resuming_session,
