@@ -1,0 +1,18 @@
+[package]
+name = "kemtls_provider"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+oqs = { git = "https://github.com/bzted/liboqs-rust.git", branch = "main", features = ["non_portable"] }
+rustls = { path = "../rustls"}
+log = "0.4.27"
+env_logger = "0.11.8"
+
+[[example]]
+name = "client"
+path = "examples/client.rs"
+
+[[example]]
+name = "server"
+path = "examples/server.rs"
