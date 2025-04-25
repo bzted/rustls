@@ -87,10 +87,10 @@ cargo run --example client
 For additional debuggin information, you can enable verbose logging:
 ```
 # Run the server example
-cargo run --example server
+RUST_LOG=debug cargo run --example server
 
 # Run the client example
-cargo run --example client
+RUST_LOG=debug cargo run --example client
 ```
 
 The examples in the `kemtls_provider/examples` directory demonstrate how to configure the provider to use KEM-based flow instead of traditional TLS 1.3.
