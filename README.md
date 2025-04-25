@@ -99,7 +99,7 @@ The examples in the `kemtls_provider/examples` directory demonstrate how to conf
 
 The implementations supports both traditional TLS 1.3 and the KEM-based flow simultaneously. To enable the KEM-based flow, specific configuration is required on both the client and server sides:
 
-# Client Configuration
+## Client Configuration
 
 To enable the flow on the client side, implement a custom `ServerCertVerifier` with the following key methods: 
 
@@ -121,7 +121,7 @@ fn requires_raw_public_keys(&self) -> bool {
 }
 ```
 
-# Server Configuration
+## Server Configuration
 
 To enable the flow on the server side, populate the `kem_key` field in the `CertifiedKey` structure when implementing a `ResolvesServerCert`:
 
@@ -137,7 +137,7 @@ let certified_key = CertifiedKey {
 
 The `kem_key` must implement the `KemKey` trait with the `decapsulate` method that corresponds to the KEM algorithm used for authentication.
 
-# Key Methods
+### Key Methods
 
 The essential operations for the KEM-based handshake are:
 
