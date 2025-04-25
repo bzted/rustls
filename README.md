@@ -41,6 +41,109 @@ obsolete cryptography by default.
 Rustls implements TLS1.2 and TLS1.3 for both clients and servers. See [the full
 list of protocol features](https://docs.rs/rustls/latest/rustls/manual/_04_features/index.html).
 
+# KEM-based TLS Implementation
+
+This fork implements a new TLS flow based on the IETF draft [draft-celi-wiggers-tls-authkem/05](https://datatracker.ietf.org/doc/draft-celi-wiggers-tls-authkem/05/) that uses Key Encapsulation Mechanisms (KEMs) instead of traditional signatures for authentication. The implementation introduces new handshake messages as defined in this draft to support KEM-based authentication.
+
+# Features
+
+* Uses ML-KEM algorithms for key exchange and authentication
+* Implements raw public keys as specified in [RFC7250](https://datatracker.ietf.org/doc/html/rfc7250) instead of traditional X.509 certificates
+* Modifies the TLS 1.3 state machine for both client and server
+* Provides a custom cryptography provider for KEM operations
+
+# Implementation Details
+
+The major modifications are in the following files: 
+
+* `client/tls13.rs`: Modified client state machine for KEM-based handshake
+* `server/tls13.rs`: Modified server state machine for KEM-based handshake
+* `tls13/key_schedule.rs`: Adapted key derivation for the KEM-based flow
+
+No-client authentication is implemented and functional.
+Client authentication is implemented but has not been fully tested yet.
+
+# Compatibility
+
+The implementation maintains full compatibility with the traditional TLS 1.3 flow, which remains the default behaviour. Both flows coexist in the same codebase, allowing users to choose which protocol to use based on their needs.
+
+* Traditional TLS 1.3 is used by default
+* To enable the KEM-based flow, you must explicitly configure it in the provider settings
+
+This design allows for gradual adoption and testing of the post-quantum secure protocol without disrupting existing implementations.
+
+# Usage
+
+A custom cryptography provider is available in the `kemtls_provider` directory, along with example client and server implementations. To run the examples 
+
+```
+# Run the server example
+cargo run --example server
+
+# Run the client example
+cargo run --example client
+```
+
+For additional debuggin information, you can enable verbose logging:
+```
+# Run the server example
+cargo run --example server
+
+# Run the client example
+cargo run --example client
+```
+
+The examples in the `kemtls_provider/examples` directory demonstrate how to configure the provider to use KEM-based flow instead of traditional TLS 1.3.
+
+# Enabling the KEM-based TLS Flow
+
+The implementations supports both traditional TLS 1.3 and the KEM-based flow simultaneously. To enable the KEM-based flow, specific configuration is required on both the client and server sides:
+
+# Client Configuration
+
+To enable the flow on the client side, implement a custom `ServerCertVerifier` with the following key methods: 
+
+```
+// In your custom ServerCertVerifier implementation:
+fn authkem(&self) -> bool {
+    // Return true to enable the KEM-based flow
+    true
+}
+
+fn encapsulate(&self, server_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    // Implement encapsulation logic using a KEM algorithm
+    // Returns (ciphertext, shared_secret)
+}
+
+fn requires_raw_public_keys(&self) -> bool {
+    // For the AuthKEM flow with raw public keys
+    true
+}
+```
+
+# Server Configuration
+
+To enable the flow on the server side, populate the `kem_key` field in the `CertifiedKey` structure when implementing a `ResolvesServerCert`:
+
+```
+// Create a CertifiedKey with KEM capabilities
+let certified_key = CertifiedKey {
+    cert: vec![cert],                      // Raw public key as certificate
+    key: signing_key,                      // Dummy signing key (not used in KEM-based flow)
+    ocsp: None,
+    kem_key: Some(Arc::new(kem_key)),      // Provide a KEM key implementation
+};
+```
+
+The `kem_key` must implement the `KemKey` trait with the `decapsulate` method that corresponds to the KEM algorithm used for authentication.
+
+# Key Methods
+
+The essential operations for the KEM-based handshake are:
+
+* Encapsulation: Generates a ciphertext and shared secret from the peer's public key
+* Decapsulation: Recovers the shared secret from the ciphertext using its private key
+
 ### Platform support
 
 While Rustls itself is platform independent, by default it uses [`aws-lc-rs`] for implementing
