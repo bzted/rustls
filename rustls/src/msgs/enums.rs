@@ -120,6 +120,8 @@ enum_builder! {
         TransportParametersDraft => 0xffa5,
         EncryptedClientHello => 0xfe0d, // https://datatracker.ietf.org/doc/html/draft-ietf-tls-esni-18#section-11.1
         EncryptedClientHelloOuterExtensions => 0xfd00, // https://datatracker.ietf.org/doc/html/draft-ietf-tls-esni-18#section-5.1
+        StoredAuthKey => 0x0034, // These are testing values, real values are to be decided
+        EarlyAuth => 0x0035, // These are testing values, real values are to be decided
     }
 }
 

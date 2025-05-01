@@ -602,6 +602,8 @@ pub enum ClientExtension {
     EncryptedClientHello(EncryptedClientHello),
     EncryptedClientHelloOuterExtensions(Vec<ExtensionType>),
     AuthorityNames(Vec<DistinguishedName>),
+    StoredAuthKey(StoredAuthKey), // Added extensions
+    EarlyAuth(EarlyAuth),         // Added extensions
     Unknown(UnknownExtension),
 }
 
@@ -632,6 +634,8 @@ impl ClientExtension {
                 ExtensionType::EncryptedClientHelloOuterExtensions
             }
             Self::AuthorityNames(_) => ExtensionType::CertificateAuthorities,
+            Self::StoredAuthKey(_) => ExtensionType::StoredAuthKey,
+            Self::EarlyAuth(_) => ExtensionType::EarlyAuth,
             Self::Unknown(r) => r.typ,
         }
     }
@@ -667,6 +671,8 @@ impl Codec<'_> for ClientExtension {
             Self::EncryptedClientHello(r) => r.encode(nested.buf),
             Self::EncryptedClientHelloOuterExtensions(r) => r.encode(nested.buf),
             Self::AuthorityNames(r) => r.encode(nested.buf),
+            Self::StoredAuthKey(r) => r.encode(nested.buf),
+            Self::EarlyAuth(_) => {} // EarlyAuth extension is empty
             Self::Unknown(r) => r.encode(nested.buf),
         }
     }
@@ -716,6 +722,8 @@ impl Codec<'_> for ClientExtension {
                 Self::EncryptedClientHelloOuterExtensions(Vec::read(&mut sub)?)
             }
             ExtensionType::CertificateAuthorities => Self::AuthorityNames(Vec::read(&mut sub)?),
+            ExtensionType::StoredAuthKey => Self::StoredAuthKey(StoredAuthKey::read(&mut sub)?),
+            ExtensionType::EarlyAuth if !sub.any_left() => Self::EarlyAuth(EarlyAuth {}),
             _ => Self::Unknown(UnknownExtension::read(typ, &mut sub)),
         };
 
@@ -775,6 +783,8 @@ pub enum ServerExtension {
     TransportParametersDraft(Vec<u8>),
     EarlyData,
     EncryptedClientHello(ServerEncryptedClientHello),
+    StoredAuthKey,
+    EarlyAuth,
     Unknown(UnknownExtension),
 }
 
@@ -797,6 +807,8 @@ impl ServerExtension {
             Self::TransportParametersDraft(_) => ExtensionType::TransportParametersDraft,
             Self::EarlyData => ExtensionType::EarlyData,
             Self::EncryptedClientHello(_) => ExtensionType::EncryptedClientHello,
+            Self::StoredAuthKey => ExtensionType::StoredAuthKey,
+            Self::EarlyAuth => ExtensionType::EarlyAuth,
             Self::Unknown(r) => r.typ,
         }
     }
@@ -825,6 +837,8 @@ impl Codec<'_> for ServerExtension {
                 nested.buf.extend_from_slice(r);
             }
             Self::EncryptedClientHello(r) => r.encode(nested.buf),
+            Self::StoredAuthKey => 1u8.encode(nested.buf), // We send a '1'
+            Self::EarlyAuth => {}                          // EarlyAuth extension is empty
             Self::Unknown(r) => r.encode(nested.buf),
         }
     }
@@ -861,6 +875,14 @@ impl Codec<'_> for ServerExtension {
             ExtensionType::EncryptedClientHello => {
                 Self::EncryptedClientHello(ServerEncryptedClientHello::read(&mut sub)?)
             }
+            ExtensionType::StoredAuthKey => {
+                let ack = u8::read(&mut sub)?;
+                if ack != 1 {
+                    return Err(InvalidMessage::InvalidContentType);
+                }
+                Self::StoredAuthKey
+            }
+            ExtensionType::EarlyAuth if !sub.any_left() => Self::EarlyAuth,
             _ => Self::Unknown(UnknownExtension::read(typ, &mut sub)),
         };
 
@@ -3166,6 +3188,46 @@ impl Codec<'_> for ServerEncryptedClientHello {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct StoredAuthKey {
+    pub(crate) key_fingerprint: PayloadU8,
+    pub(crate) ciphertext: PayloadU16,
+}
+
+impl StoredAuthKey {
+    pub(crate) fn new(fingerprint: Vec<u8>, ciphertext: Vec<u8>) -> Self {
+        Self {
+            key_fingerprint: PayloadU8::new(fingerprint),
+            ciphertext: PayloadU16::new(ciphertext),
+        }
+    }
+}
+
+impl Codec<'_> for StoredAuthKey {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        self.key_fingerprint.encode(bytes);
+        self.ciphertext.encode(bytes);
+    }
+
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
+        Ok(Self {
+            key_fingerprint: PayloadU8::read(r)?,
+            ciphertext: PayloadU16::read(r)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EarlyAuth {}
+
+impl Codec<'_> for EarlyAuth {
+    fn encode(&self, _bytes: &mut Vec<u8>) {}
+
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
+        r.expect_empty("EarlyAuth")?; // Ensure the extension is empty
+        Ok(Self {})
+    }
+}
 /// The method of encoding to use for a handshake message.
 ///
 /// In some cases a handshake message may be encoded differently depending on the purpose
