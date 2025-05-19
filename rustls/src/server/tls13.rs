@@ -1209,6 +1209,7 @@ impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
             );
 
         if self.client_auth {
+            debug!("SERVER GOING INTO EXPECT CERTIFICATE FOR CLIENT AUTH");
             Ok(Box::new(ExpectCertificateForClientAuth {
                 config: self.config,
                 transcript: self.transcript,
@@ -1220,6 +1221,7 @@ impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
             }))
         } else {
             let key_schedule = auth_handhsake_key_schedule.into_main_secret(None);
+            debug!("SERVER GOING INTO EXPECT CLIENT FINISHED");
             Ok(Box::new(ExpectClientFinished {
                 config: self.config,
                 transcript: self.transcript,
@@ -1264,7 +1266,12 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
             HandshakePayload::CertificateTls13
         )?;
 
-        if cert_chain.context.0.is_empty() {
+        let owned_chain = cert_chain
+            .into_certificate_chain()
+            .into_owned();
+
+        if owned_chain.is_empty() {
+            debug!("CERTIFICATE EMPTY");
             if self
                 .config
                 .verifier
@@ -1272,6 +1279,7 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
             {
                 return Err(Error::NoCertificatesPresented);
             }
+            debug!("CLIENT AUTH NOT MANDATORY, CONTINUIN W/O CLIENT AUTH");
             let key_schedule = self.key_schedule.into_main_secret(None);
 
             return Ok(Box::new(ExpectClientFinished {
@@ -1285,9 +1293,6 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
             }));
         }
 
-        let owned_chain = cert_chain
-            .into_certificate_chain()
-            .into_owned();
         let (leaf_cert, ca_certs) = owned_chain
             .split_first()
             .ok_or(Error::NoCertificatesPresented)?;
@@ -1320,6 +1325,7 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
 
         cx.common.peer_certificates = Some(owned_chain.clone());
 
+        debug!("SERVER GOING INTO EXPECT CLIENT FINISHED");
         Ok(Box::new(ExpectClientFinished {
             config: self.config,
             transcript: self.transcript,

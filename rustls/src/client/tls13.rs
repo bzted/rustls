@@ -1173,6 +1173,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
                 );
 
             if let Some(client_auth) = &self.client_auth {
+                debug!("CLIENT AUTH REQUESTED, SENDING CERTIFICATE");
                 let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
                 handle_client_auth(&mut flight, client_auth, &self.config);
                 flight.finish(cx.common);

@@ -1,5 +1,6 @@
-use kemtls_provider::resolver::{KeyPair, ServerCertResolver};
+use kemtls_provider::resolver::{ClientCertResolver, KeyPair, ServerCertResolver};
 use kemtls_provider::sign::DummySigningKey;
+use kemtls_provider::verify::ServerVerifier;
 use kemtls_provider::{provider, MlKemKey};
 use log::debug;
 use oqs::kem::Kem;
@@ -32,6 +33,9 @@ fn main() {
     // Create our custom resolver
     let resolver = Arc::new(ServerCertResolver::new(key_pair));
 
+    // Create our custom verifier
+    let client_verifier = Arc::new(ServerVerifier::new());
+
     // Set up TLS server with AuthKEM provider
     let crypto_provider = provider();
 
@@ -43,7 +47,7 @@ fn main() {
     let mut server_config = ServerConfig::builder_with_provider(crypto_provider.into())
         .with_safe_default_protocol_versions()
         .unwrap()
-        .with_no_client_auth()
+        .with_client_cert_verifier(client_verifier)
         .with_cert_resolver(resolver);
 
     server_config.key_log = Arc::new(rustls::KeyLogFile::new());
@@ -69,7 +73,7 @@ fn main() {
                     "Connection: closed\r\n",
                     "Content-Type: text/html\r\n",
                     "\r\n",
-                    "<h1>Hello World!</h1>\r\n"
+                    "<h1>Hello Authenticated World!</h1>\r\n"
                 )
                 .as_bytes();
 
@@ -79,7 +83,6 @@ fn main() {
 
                 conn.send_close_notify();
                 conn.write_tls(&mut stream).unwrap();
-                conn.complete_io(&mut stream).unwrap();
             }
             Err(e) => {
                 eprintln!("{:?}", e);

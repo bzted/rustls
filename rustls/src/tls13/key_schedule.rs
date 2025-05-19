@@ -673,8 +673,15 @@ pub(crate) struct KeyScheduleAuthenticatedHandshake {
 impl KeyScheduleAuthenticatedHandshake {
     pub(crate) fn into_main_secret(mut self, client_ss: Option<&[u8]>) -> KeyScheduleMainSecret {
         if let Some(client_ss) = client_ss {
+            debug!("Client auth requested");
+            debug!("Client shared secret length: {}", client_ss.len());
+            debug!(
+                "Client shared secret first bytes: {:02x?}",
+                &client_ss[..std::cmp::min(8, client_ss.len())]
+            );
             self.ks.input_secret(client_ss);
         } else {
+            debug!("No client auth request, client_ss: None");
             self.ks.input_empty();
         }
 

@@ -16,3 +16,11 @@ path = "examples/client.rs"
 [[example]]
 name = "server"
 path = "examples/server.rs"
+
+[[example]]
+name = "client_auth"
+path = "examples/client_auth.rs"
+
+[[example]]
+name = "server_full"
+path = "examples/server_full.rs"
