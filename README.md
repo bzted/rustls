@@ -60,8 +60,7 @@ The major modifications are in the following files:
 * `server/tls13.rs`: Modified server state machine for KEM-based handshake
 * `tls13/key_schedule.rs`: Adapted key derivation for the KEM-based flow
 
-No-client authentication is implemented and functional.
-Client authentication is implemented but has not been fully tested yet.
+Both no-client authentication and mutual authentication are implemented and functional.
 
 # Compatibility
 
@@ -82,6 +81,11 @@ cargo run --example server
 
 # Run the client example
 cargo run --example client
+
+# To test mutual authentication, run:
+cargo run --example server_full
+
+cargo run --example client_auth
 ```
 
 For additional debuggin information, you can enable verbose logging:
@@ -120,7 +124,17 @@ fn requires_raw_public_keys(&self) -> bool {
     true
 }
 ```
+To test mutual authentication, implement a custom `ResolvesClientCert` populating the `kem_key` field in the `CertifiedKey` structure:
 
+```
+// Create a CertifiedKey with KEM capabilities
+let certified_key = CertifiedKey {
+    cert: vec![cert],                      // Raw public key as certificate
+    key: signing_key,                      // Dummy signing key (not used in KEM-based flow)
+    ocsp: None,
+    kem_key: Some(Arc::new(kem_key)),      // Provide a KEM key implementation
+};
+```
 ## Server Configuration
 
 To enable the flow on the server side, populate the `kem_key` field in the `CertifiedKey` structure when implementing a `ResolvesServerCert`:
@@ -136,6 +150,26 @@ let certified_key = CertifiedKey {
 ```
 
 The `kem_key` must implement the `KemKey` trait with the `decapsulate` method that corresponds to the KEM algorithm used for authentication.
+
+For mutual authentication, implement a custom `ClientCertVerifier` with the following methods:
+
+```
+// In your custom ServerCertVerifier implementation:
+fn authkem(&self) -> bool {
+    // Return true to enable the KEM-based flow
+    true
+}
+
+fn encapsulate(&self, server_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    // Implement encapsulation logic using a KEM algorithm
+    // Returns (ciphertext, shared_secret)
+}
+
+fn requires_raw_public_keys(&self) -> bool {
+    // For the AuthKEM flow with raw public keys
+    true
+}
+```
 
 ### Key Methods
 
