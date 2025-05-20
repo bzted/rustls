@@ -439,7 +439,6 @@ mod client_hello {
                     randoms: self.randoms,
                     suite: self.suite,
                     client_auth: doing_client_auth,
-                    server_cert: CertificateChain(server_key.get_cert().to_vec()),
                     server_key: server_kem_key,
                     send_tickets: self.send_tickets,
                 }))
@@ -1173,7 +1172,6 @@ struct ExpectClientKemEncapsulation {
     key_schedule: KeyScheduleHandshake,
     randoms: ConnectionRandoms,
     client_auth: bool,
-    server_cert: CertificateChain<'static>,
     server_key: Arc<dyn KemKey>,
     send_tickets: usize,
 }
@@ -1216,7 +1214,6 @@ impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
                 suite: self.suite,
                 key_schedule: auth_handhsake_key_schedule,
                 randoms: self.randoms,
-                server_cert: self.server_cert,
                 send_tickets: self.send_tickets,
             }))
         } else {
@@ -1245,7 +1242,6 @@ struct ExpectCertificateForClientAuth {
     suite: &'static Tls13CipherSuite,
     key_schedule: KeyScheduleAuthenticatedHandshake,
     randoms: ConnectionRandoms,
-    server_cert: CertificateChain<'static>,
     send_tickets: usize,
 }
 
@@ -1279,7 +1275,7 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
             {
                 return Err(Error::NoCertificatesPresented);
             }
-            debug!("CLIENT AUTH NOT MANDATORY, CONTINUIN W/O CLIENT AUTH");
+            debug!("CLIENT AUTH NOT MANDATORY, CONTINUING W/O CLIENT AUTH");
             let key_schedule = self.key_schedule.into_main_secret(None);
 
             return Ok(Box::new(ExpectClientFinished {
