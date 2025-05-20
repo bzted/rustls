@@ -93,10 +93,6 @@ impl ResolvesClientCert for ClientCertResolver {
     fn has_certs(&self) -> bool {
         true
     }
-
-    fn only_raw_public_keys(&self) -> bool {
-        true
-    }
 }
 
 #[derive(Debug)]

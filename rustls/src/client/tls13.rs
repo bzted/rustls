@@ -439,36 +439,6 @@ fn validate_encrypted_extensions(
     Ok(())
 }
 
-fn handle_client_auth(
-    flight: &mut HandshakeFlightTls13<'_>,
-    client_auth: &ClientAuthDetails,
-    config: &ClientConfig,
-) {
-    match client_auth {
-        ClientAuthDetails::Empty { auth_context_tls13 } => {
-            emit_certificate_tls13(flight, None, auth_context_tls13.clone());
-        }
-        ClientAuthDetails::Verify {
-            certkey,
-            auth_context_tls13,
-            compressor,
-            ..
-        } => {
-            if let Some(compressor) = compressor {
-                emit_compressed_certificate_tls13(
-                    flight,
-                    &certkey,
-                    auth_context_tls13.clone(),
-                    compressor.clone(),
-                    config,
-                );
-            } else {
-                emit_certificate_tls13(flight, Some(&certkey), auth_context_tls13.clone());
-            }
-            debug!("Client sent his certificate");
-        }
-    }
-}
 fn get_server_pk_from_cert(cert: &CertificateDer<'_>) -> Result<Vec<u8>, Error> {
     match x509_parser::parse_x509_certificate(cert.as_ref()) {
         Ok((_, x509)) => {
@@ -1175,21 +1145,84 @@ impl State<ClientConnectionData> for ExpectCertificate {
             if let Some(client_auth) = &self.client_auth {
                 debug!("CLIENT AUTH REQUESTED, SENDING CERTIFICATE");
                 let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
-                handle_client_auth(&mut flight, client_auth, &self.config);
-                flight.finish(cx.common);
+                match client_auth {
+                    ClientAuthDetails::Empty { auth_context_tls13 } => {
+                        emit_certificate_tls13(&mut flight, None, auth_context_tls13.clone());
+                        debug!("Client sent empty certificate");
+                        flight.finish(cx.common);
 
-                Ok(Box::new(ExpectServerKemEncapsulation {
-                    config: self.config,
-                    server_name: self.server_name,
-                    randoms: self.randoms,
-                    suite: self.suite,
-                    transcript: self.transcript,
-                    auth_key_schedule: auth_handshake_key_schedule,
-                    client_auth: self.client_auth,
-                    cert_verified: verify::ServerCertVerified::assertion(),
-                    sig_verified: verify::HandshakeSignatureValid::assertion(),
-                    ech_retry_configs: self.ech_retry_configs,
-                }))
+                        debug!(
+                            "Continuing as if no client auth requested, sending finished message"
+                        );
+                        let mut finished_flight = HandshakeFlightTls13::new(&mut self.transcript);
+
+                        let key_schedule = auth_handshake_key_schedule.into_main_secret(None);
+                        let verify_data = key_schedule.sign_client_finish(
+                            &finished_flight
+                                .transcript
+                                .current_hash(),
+                        );
+                        emit_finished_tls13(&mut finished_flight, &verify_data);
+                        finished_flight.finish(cx.common);
+                        cx.common.check_aligned_handshake()?;
+
+                        let key_schedule_traffic = key_schedule.into_client_traffic(
+                            self.transcript.current_hash(),
+                            &*self.config.key_log,
+                            &self.randoms.client,
+                            Side::Client,
+                            cx.common,
+                        );
+                        cx.common
+                            .start_outgoing_traffic(&mut cx.sendable_plaintext);
+                        Ok(Box::new(ExpectServerFinished {
+                            config: self.config,
+                            server_name: self.server_name,
+                            suite: self.suite,
+                            transcript: self.transcript,
+                            key_schedule: key_schedule_traffic,
+                            randoms: self.randoms,
+                            cert_verified: verify::ServerCertVerified::assertion(),
+                        }))
+                    }
+                    ClientAuthDetails::Verify {
+                        certkey,
+                        auth_context_tls13,
+                        compressor,
+                        ..
+                    } => {
+                        if let Some(compressor) = compressor {
+                            emit_compressed_certificate_tls13(
+                                &mut flight,
+                                &certkey,
+                                auth_context_tls13.clone(),
+                                compressor.clone(),
+                                &self.config,
+                            );
+                        } else {
+                            emit_certificate_tls13(
+                                &mut flight,
+                                Some(&certkey),
+                                auth_context_tls13.clone(),
+                            );
+                        }
+                        debug!("Client sent his certificate");
+                        flight.finish(cx.common);
+
+                        Ok(Box::new(ExpectServerKemEncapsulation {
+                            config: self.config,
+                            server_name: self.server_name,
+                            randoms: self.randoms,
+                            suite: self.suite,
+                            transcript: self.transcript,
+                            auth_key_schedule: auth_handshake_key_schedule,
+                            client_auth: self.client_auth,
+                            cert_verified: verify::ServerCertVerified::assertion(),
+                            sig_verified: verify::HandshakeSignatureValid::assertion(),
+                            ech_retry_configs: self.ech_retry_configs,
+                        }))
+                    }
+                }
             } else {
                 debug!("Client sending finished message");
                 let mut finished_flight = HandshakeFlightTls13::new(&mut self.transcript);

@@ -143,11 +143,6 @@ impl ClientCertVerifier for ServerVerifier {
         vec![rustls::SignatureScheme::ED25519]
     }
 
-    fn requires_raw_public_keys(&self) -> bool {
-        debug!("requires_raw_public_keys called - returning true");
-        true
-    }
-
     fn authkem(&self) -> bool {
         true
     }
@@ -166,5 +161,9 @@ impl ClientCertVerifier for ServerVerifier {
             .map_err(|_| Error::General("Encapsulation failed".into()))?;
 
         Ok((ct.as_ref().to_vec(), ss.as_ref().to_vec()))
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        false
     }
 }
