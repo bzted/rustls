@@ -1187,6 +1187,21 @@ impl ClientHelloPayload {
         }
     }
 
+    pub(crate) fn authkem_psk(&self) -> bool {
+        self.find_extension(ExtensionType::StoredAuthKey)
+            .is_some()
+    }
+
+    pub(crate) fn stored_auth_key(&self) -> Option<&StoredAuthKey> {
+        self.find_extension(ExtensionType::StoredAuthKey)
+            .and_then(|ext| {
+                if let ClientExtension::StoredAuthKey(ref sak) = ext {
+                    Some(sak)
+                } else {
+                    None
+                }
+            })
+    }
     #[cfg(feature = "tls12")]
     pub(crate) fn ems_support_offered(&self) -> bool {
         self.find_extension(ExtensionType::ExtendedMasterSecret)
@@ -1470,6 +1485,11 @@ impl ServerHelloPayload {
             ServerExtension::PresharedKey(index) => Some(*index),
             _ => None,
         }
+    }
+
+    pub(crate) fn authkem_psk(&self) -> bool {
+        self.find_extension(ExtensionType::StoredAuthKey)
+            .is_some()
     }
 
     pub(crate) fn ecpoints_extension(&self) -> Option<&[ECPointFormat]> {

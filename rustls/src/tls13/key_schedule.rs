@@ -30,6 +30,7 @@ enum SecretKind {
     ServerEchHrrConfirmationSecret,
     ClientHandshakeAuthenticatedTrafficSecret, // New secret
     ServerHandshakeAuthenticatedTrafficSecret, // New secret
+    ClientEarlyHandshakeTrafficSecret,         // New secret, AuthKEM PSK
 }
 
 impl SecretKind {
@@ -51,6 +52,7 @@ impl SecretKind {
             ServerEchHrrConfirmationSecret => b"hrr ech accept confirmation",
             ClientHandshakeAuthenticatedTrafficSecret => b"c ahs traffic",
             ServerHandshakeAuthenticatedTrafficSecret => b"s ahs traffic",
+            ClientEarlyHandshakeTrafficSecret => b"c e hs traffic",
         }
     }
 
@@ -68,6 +70,7 @@ impl SecretKind {
             ServerHandshakeAuthenticatedTrafficSecret => {
                 "SERVER_HANDSHAKE_AUTHENTICATED_TRAFFIC_SECRET"
             }
+            ClientEarlyHandshakeTrafficSecret => "CLIENT_EARLY_HANDSHAKE_TRAFFIC_SECRET",
             ExporterMasterSecret => "EXPORTER_SECRET",
             _ => {
                 return None;
@@ -129,6 +132,30 @@ impl KeyScheduleEarly {
             // If 0-RTT should be rejected, this will be clobbered by ExtensionProcessing
             // before the application can see.
             common.quic.early_secret = Some(client_early_traffic_secret);
+        }
+    }
+
+    pub(crate) fn client_early_handshake_traffic_secret(
+        &self,
+        hs_hash: &hash::Output,
+        key_log: &dyn KeyLog,
+        client_random: &[u8; 32],
+        common: &mut CommonState,
+    ) {
+        let client_early_handshake_traffic_secret = self.ks.derive_logged_secret(
+            SecretKind::ClientEarlyHandshakeTrafficSecret,
+            hs_hash.as_ref(),
+            key_log,
+            client_random,
+        );
+
+        match common.side {
+            Side::Client => self
+                .ks
+                .set_encrypter(&client_early_handshake_traffic_secret, common),
+            Side::Server => self
+                .ks
+                .set_decrypter(&client_early_handshake_traffic_secret, common),
         }
     }
 
@@ -642,7 +669,7 @@ impl KeyScheduleTraffic {
     }
     /// Used for Authkem
     /// Injects a shared secret if client auth was required
-    pub(crate) fn new_authkem(
+    fn new_authkem(
         ks: KeySchedule,
         current_client_traffic_secret: OkmBlock,
         current_server_traffic_secret: OkmBlock,

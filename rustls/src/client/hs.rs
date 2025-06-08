@@ -3,21 +3,21 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Deref;
+use x509_parser::der_parser::rusticata_macros::debug;
 
 use pki_types::ServerName;
 
-use super::ResolvesClientCert;
-use super::Tls12Resumption;
 #[cfg(feature = "tls12")]
 use super::tls12;
-use crate::SupportedCipherSuite;
+use super::ResolvesClientCert;
+use super::Tls12Resumption;
 #[cfg(feature = "logging")]
 use crate::bs_debug;
 use crate::check::inappropriate_handshake_message;
 use crate::client::client_conn::ClientConnectionData;
 use crate::client::common::ClientHelloDetails;
 use crate::client::ech::EchState;
-use crate::client::{ClientConfig, EchMode, EchStatus, tls13};
+use crate::client::{tls13, ClientConfig, EchMode, EchStatus};
 use crate::common_state::{CommonState, HandshakeKind, KxState, State};
 use crate::conn::ConnectionRandoms;
 use crate::crypto::{ActiveKeyExchange, KeyExchangeAlgorithm};
@@ -26,9 +26,12 @@ use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHashBuffer;
 use crate::log::{debug, trace};
 use crate::msgs::base::Payload;
+use crate::msgs::base::PayloadU16;
+use crate::msgs::base::PayloadU8;
 use crate::msgs::enums::{
     CertificateType, Compression, ECPointFormat, ExtensionType, PSKKeyExchangeMode,
 };
+use crate::msgs::handshake::StoredAuthKey;
 use crate::msgs::handshake::{
     CertificateStatusRequest, ClientExtension, ClientHelloPayload, ClientSessionTicket,
     ConvertProtocolNameList, HandshakeMessagePayload, HandshakePayload, HasServerExtensions,
@@ -39,6 +42,8 @@ use crate::msgs::persist;
 use crate::sync::Arc;
 use crate::tls13::key_schedule::KeyScheduleEarly;
 use crate::verify::ServerCertVerifier;
+use crate::version::TLS13;
+use crate::SupportedCipherSuite;
 
 pub(super) type NextState<'a> = Box<dyn State<ClientConnectionData> + 'a>;
 pub(super) type NextStateOrError<'a> = Result<NextState<'a>, Error>;
@@ -406,6 +411,29 @@ fn emit_client_hello_for_retry(
         }
     }
 
+    let mut ehss: Option<Vec<u8>> = None;
+    if let Some(authkem_psk_key) = &config.authkem_psk_key {
+        match authkem_psk_key.encapsulate() {
+            Ok((ct, ss)) => {
+                debug!("StoredAuthKey Sent");
+                ehss = Some(ss);
+                exts.push(ClientExtension::StoredAuthKey(StoredAuthKey {
+                    ciphertext: PayloadU16::new(ct),
+                    key_fingerprint: PayloadU8::new(Vec::new()), // calcular huella correctamente
+                }));
+                let max_early_data_size = 1000; //cambiar
+                if config.enable_early_data {
+                    cx.data
+                        .early_data
+                        .enable(max_early_data_size as usize);
+                    exts.push(ClientExtension::EarlyData);
+                }
+            }
+            Err(err) => {
+                debug!("Failed to encapsulate to authkem psk key: {:?}", err);
+            }
+        }
+    }
     // Do we have a SessionID or ticket cached for this host?
     let tls13_session = prepare_resumption(&input.resuming, &mut exts, suite, cx, config);
 
@@ -503,17 +531,50 @@ fn emit_client_hello_for_retry(
         payload: HandshakePayload::ClientHello(chp_payload),
     };
 
-    let early_key_schedule = match (ech_state.as_mut(), tls13_session) {
+    let early_key_schedule = match (ech_state.as_mut(), tls13_session, ehss) {
         // If we're performing ECH and resuming, then the PSK binder will have been dealt with
         // separately, and we need to take the early_data_key_schedule computed for the inner hello.
-        (Some(ech_state), Some(tls13_session)) => ech_state
+        (Some(ech_state), Some(tls13_session), _) => ech_state
             .early_data_key_schedule
             .take()
             .map(|schedule| (tls13_session.suite(), schedule)),
 
+        // When we are resuming via authkem psk and have a prior session
+        (_, Some(tls13_session), Some(ehss)) => Some((
+            tls13_session.suite(),
+            tls13::fill_in_authkem_psk_ss(tls13_session.suite(), cx, &ehss),
+        )),
+
+        // When we are resuming via authkem psk and do NOT have a prior session
+        (_, _, Some(ehss)) => {
+            let chosen_suite = suite
+                .or_else(|| {
+                    config
+                        .provider
+                        .cipher_suites
+                        .iter()
+                        .find(|cs| (cs.version() == &TLS13))
+                        .copied()
+                })
+                .expect("no TLS 1.3 cipher suite available");
+
+            Some((
+                chosen_suite
+                    .tls13()
+                    .expect("no suite available"),
+                tls13::fill_in_authkem_psk_ss(
+                    chosen_suite
+                        .tls13()
+                        .expect("no suite available"),
+                    cx,
+                    &ehss,
+                ),
+            ))
+        }
+
         // When we're not doing ECH and resuming, then the PSK binder need to be filled in as
         // normal.
-        (_, Some(tls13_session)) => Some((
+        (_, Some(tls13_session), _) => Some((
             tls13_session.suite(),
             tls13::fill_in_psk_binder(&tls13_session, &transcript_buffer, &mut chp),
         )),
@@ -550,7 +611,7 @@ fn emit_client_hello_for_retry(
     cx.common.send_msg(ch, false);
 
     // Calculate the hash of ClientHello and use it to derive EarlyTrafficSecret
-    let early_key_schedule = early_key_schedule.map(|(resuming_suite, schedule)| {
+    let early_key_schedule = early_key_schedule.map(|(resuming_suite, mut schedule)| {
         if !cx.data.early_data.is_enabled() {
             return schedule;
         }
@@ -569,7 +630,7 @@ fn emit_client_hello_for_retry(
             &*config.key_log,
             cx,
             resuming_suite,
-            &schedule,
+            &mut schedule,
             &mut input.sent_tls13_fake_ccs,
             transcript_buffer,
             random,

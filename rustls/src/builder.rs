@@ -1,6 +1,6 @@
 use alloc::format;
 use alloc::vec::Vec;
-use core::fmt;
+use core::fmt::{self, Debug};
 use core::marker::PhantomData;
 
 use crate::client::EchMode;
@@ -9,6 +9,7 @@ use crate::error::Error;
 use crate::msgs::handshake::ALL_KEY_EXCHANGE_ALGORITHMS;
 use crate::sync::Arc;
 use crate::time_provider::TimeProvider;
+use crate::verify::AuthKemPskKey;
 use crate::versions;
 #[cfg(doc)]
 use crate::{ClientConfig, ServerConfig};
@@ -257,6 +258,7 @@ impl<S: ConfigSide> ConfigBuilder<S, WantsVersions> {
             state: WantsVerifier {
                 versions: versions::EnabledVersions::new(versions),
                 client_ech_mode: None,
+                authkem_psk_key: None,
             },
             provider: self.provider,
             time_provider: self.time_provider,
@@ -272,6 +274,7 @@ impl<S: ConfigSide> ConfigBuilder<S, WantsVersions> {
 pub struct WantsVerifier {
     pub(crate) versions: versions::EnabledVersions,
     pub(crate) client_ech_mode: Option<EchMode>,
+    pub(crate) authkem_psk_key: Option<Arc<dyn AuthKemPskKey>>,
 }
 
 /// Helper trait to abstract [`ConfigBuilder`] over building a [`ClientConfig`] or [`ServerConfig`].

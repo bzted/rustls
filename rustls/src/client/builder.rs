@@ -5,14 +5,15 @@ use pki_types::{CertificateDer, PrivateKeyDer};
 
 use super::client_conn::Resumption;
 use crate::builder::{ConfigBuilder, WantsVerifier};
-use crate::client::{ClientConfig, EchMode, ResolvesClientCert, handy};
+use crate::client::{handy, ClientConfig, EchMode, ResolvesClientCert};
 use crate::error::Error;
 use crate::key_log::NoKeyLog;
 use crate::sign::{CertifiedKey, SingleCertAndKey};
 use crate::sync::Arc;
+use crate::verify::AuthKemPskKey;
 use crate::versions::TLS13;
 use crate::webpki::{self, WebPkiServerVerifier};
-use crate::{WantsVersions, compress, verify, versions};
+use crate::{compress, verify, versions, WantsVersions};
 
 impl ConfigBuilder<ClientConfig, WantsVersions> {
     /// Enable Encrypted Client Hello (ECH) in the given mode.
@@ -73,6 +74,7 @@ impl ConfigBuilder<ClientConfig, WantsVerifier> {
                 versions: self.state.versions,
                 verifier,
                 client_ech_mode: self.state.client_ech_mode,
+                authkem_psk_key: self.state.authkem_psk_key,
             },
             provider: self.provider,
             time_provider: self.time_provider,
@@ -85,6 +87,12 @@ impl ConfigBuilder<ClientConfig, WantsVerifier> {
     pub fn dangerous(self) -> danger::DangerousClientConfigBuilder {
         danger::DangerousClientConfigBuilder { cfg: self }
     }
+
+    /// Pass a psk key in the clients configuration
+    pub fn with_custom_authkem_psk_key(mut self, psk: Arc<dyn AuthKemPskKey>) -> Self {
+        self.state.authkem_psk_key = Some(psk);
+        self
+    }
 }
 
 /// Container for unsafe APIs
@@ -93,7 +101,7 @@ pub(super) mod danger {
 
     use crate::client::WantsClientCert;
     use crate::sync::Arc;
-    use crate::{ClientConfig, ConfigBuilder, WantsVerifier, verify};
+    use crate::{verify, ClientConfig, ConfigBuilder, WantsVerifier};
 
     /// Accessor for dangerous configuration options.
     #[derive(Debug)]
@@ -113,6 +121,7 @@ pub(super) mod danger {
                     versions: self.cfg.state.versions,
                     verifier,
                     client_ech_mode: self.cfg.state.client_ech_mode,
+                    authkem_psk_key: self.cfg.state.authkem_psk_key,
                 },
                 provider: self.cfg.provider,
                 time_provider: self.cfg.time_provider,
@@ -131,6 +140,7 @@ pub struct WantsClientCert {
     versions: versions::EnabledVersions,
     verifier: Arc<dyn verify::ServerCertVerifier>,
     client_ech_mode: Option<EchMode>,
+    authkem_psk_key: Option<Arc<dyn AuthKemPskKey>>,
 }
 
 impl ConfigBuilder<ClientConfig, WantsClientCert> {
@@ -181,6 +191,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             cert_compression_cache: Arc::new(compress::CompressionCache::default()),
             cert_decompressors: compress::default_cert_decompressors().to_vec(),
             ech_mode: self.state.client_ech_mode,
+            authkem_psk_key: self.state.authkem_psk_key,
         }
     }
 }

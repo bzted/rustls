@@ -4,6 +4,7 @@ use rustls::crypto::aws_lc_rs;
 mod algorithms;
 mod kem_key;
 mod key_exchange;
+pub mod psk_key;
 pub mod resolver;
 pub mod sign;
 pub mod verify;

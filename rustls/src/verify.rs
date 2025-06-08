@@ -63,6 +63,12 @@ impl ClientCertVerified {
     }
 }
 
+/// AuthKemPsk
+pub trait AuthKemPskKey: Send + Sync + Debug {
+    /// Encapsulate Method for AuthKem Psk
+    fn encapsulate(&self) -> Result<(Vec<u8>, Vec<u8>), Error>;
+}
+
 /// Something that can verify a server certificate chain, and verify
 /// signatures made by certificates.
 #[allow(unreachable_pub)]

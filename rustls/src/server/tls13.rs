@@ -52,14 +52,14 @@ mod client_hello {
     use crate::msgs::handshake::{
         CertReqExtension, CertificatePayloadTls13, CertificateRequestPayloadTls13,
         ClientHelloPayload, HelloRetryExtension, HelloRetryRequest, KeyShareEntry, Random,
-        ServerExtension, ServerHelloPayload, SessionId,
+        ServerExtension, ServerHelloPayload, SessionId, StoredAuthKey,
     };
     use crate::server::common::ActiveCertifiedKey;
-    use crate::sign;
     use crate::tls13::key_schedule::{
         KeyScheduleEarly, KeyScheduleHandshake, KeySchedulePreHandshake,
     };
     use crate::verify::DigitallySignedStruct;
+    use crate::{client, sign};
 
     #[derive(PartialEq)]
     pub(super) enum EarlyDataDecision {
@@ -336,7 +336,17 @@ mod client_hello {
                     .clone_from(&resume.client_cert_chain);
             }
 
-            let full_handshake = resumedata.is_none();
+            let server_kem_key = server_key.get_kem_key();
+            let mut authkem_psk_ss = None;
+            if client_hello.authkem_psk() && self.config.max_early_data_size > 0 {
+                if let Some(stored_auth_key) = client_hello.stored_auth_key() {
+                    if let Some(ref server_kem_key) = server_kem_key {
+                        let ct = &stored_auth_key.ciphertext.0;
+                        authkem_psk_ss = Some(server_kem_key.decapsulate(ct.as_ref())?);
+                    }
+                }
+            }
+            let full_handshake = resumedata.is_none() && authkem_psk_ss.is_none();
             self.transcript.add_message(chm);
             let key_schedule = emit_server_hello(
                 &mut self.transcript,
@@ -349,6 +359,7 @@ mod client_hello {
                 resumedata
                     .as_ref()
                     .map(|x| &x.master_secret.0[..]),
+                authkem_psk_ss.clone(),
                 &self.config,
             )?;
             if !self.done_retry {
@@ -373,10 +384,11 @@ mod client_hello {
                 client_hello,
                 resumedata.as_ref(),
                 self.extra_exts,
+                authkem_psk_ss.clone(),
                 &self.config,
             )?;
 
-            let (server_kem_key, doing_client_auth) = if full_handshake {
+            let doing_client_auth = if full_handshake {
                 let client_auth = emit_certificate_req_tls13(&mut flight, &self.config)?;
 
                 if let Some(compressor) = cert_compressor {
@@ -390,7 +402,6 @@ mod client_hello {
                 } else {
                     emit_certificate_tls13(&mut flight, server_key.get_cert(), ocsp_response);
                 }
-                let server_kem_key = server_key.get_kem_key();
 
                 if server_kem_key.is_none() {
                     emit_certificate_verify_tls13(
@@ -400,9 +411,9 @@ mod client_hello {
                         &sigschemes_ext,
                     )?;
                 }
-                (server_kem_key, client_auth)
+                client_auth
             } else {
-                (None, false)
+                false
             };
 
             // If we're not doing early data, then the next messages we receive
@@ -429,48 +440,72 @@ mod client_hello {
                 }
             }
 
-            if let Some(server_kem_key) = server_kem_key {
-                debug!("SERVER GOING INTO EXPECT CLIENT KEM ENCAPS");
-                flight.finish(cx.common);
-                Ok(Box::new(ExpectClientKemEncapsulation {
-                    config: Arc::clone(&self.config),
-                    transcript: self.transcript,
-                    key_schedule,
-                    randoms: self.randoms,
-                    suite: self.suite,
-                    client_auth: doing_client_auth,
-                    server_key: server_kem_key,
-                    send_tickets: self.send_tickets,
-                }))
-            } else {
-                cx.common.check_aligned_handshake()?;
-                let key_schedule_traffic =
-                    emit_finished_tls13(flight, &self.randoms, cx, key_schedule, &self.config);
-
-                if !doing_client_auth && self.config.send_half_rtt_data {
-                    // Application data can be sent immediately after Finished, in one
-                    // flight.  However, if client auth is enabled, we don't want to send
-                    // application data to an unauthenticated peer.
-                    cx.common
-                        .start_outgoing_traffic(&mut cx.sendable_plaintext);
+            match (server_kem_key, authkem_psk_ss.is_some()) {
+                (Some(server_kem_key), false) => {
+                    debug!("SERVER GOING INTO EXPECT CLIENT KEM ENCAPS");
+                    flight.finish(cx.common);
+                    Ok(Box::new(ExpectClientKemEncapsulation {
+                        config: Arc::clone(&self.config),
+                        transcript: self.transcript,
+                        key_schedule,
+                        randoms: self.randoms,
+                        suite: self.suite,
+                        client_auth: doing_client_auth,
+                        server_key: server_kem_key,
+                        send_tickets: self.send_tickets,
+                    }))
                 }
+                _ => {
+                    cx.common.check_aligned_handshake()?;
+                    let key_schedule_traffic =
+                        emit_finished_tls13(flight, &self.randoms, cx, key_schedule, &self.config);
 
-                if doing_client_auth {
-                    if self
-                        .config
-                        .cert_decompressors
-                        .is_empty()
+                    if !doing_client_auth && self.config.send_half_rtt_data {
+                        // Application data can be sent immediately after Finished, in one
+                        // flight.  However, if client auth is enabled, we don't want to send
+                        // application data to an unauthenticated peer.
+                        cx.common
+                            .start_outgoing_traffic(&mut cx.sendable_plaintext);
+                    }
+
+                    if doing_client_auth {
+                        if self
+                            .config
+                            .cert_decompressors
+                            .is_empty()
+                        {
+                            Ok(Box::new(ExpectCertificate {
+                                config: self.config,
+                                transcript: self.transcript,
+                                suite: self.suite,
+                                key_schedule: key_schedule_traffic,
+                                send_tickets: self.send_tickets,
+                                message_already_in_transcript: false,
+                            }))
+                        } else {
+                            Ok(Box::new(ExpectCertificateOrCompressedCertificate {
+                                config: self.config,
+                                transcript: self.transcript,
+                                suite: self.suite,
+                                key_schedule: key_schedule_traffic,
+                                send_tickets: self.send_tickets,
+                            }))
+                        }
+                    } else if doing_early_data == EarlyDataDecision::Accepted
+                        && !cx.common.is_quic()
                     {
-                        Ok(Box::new(ExpectCertificate {
+                        // Not used for QUIC: RFC 9001 §8.3: Clients MUST NOT send the EndOfEarlyData
+                        // message. A server MUST treat receipt of a CRYPTO frame in a 0-RTT packet as a
+                        // connection error of type PROTOCOL_VIOLATION.
+                        Ok(Box::new(ExpectEarlyData {
                             config: self.config,
                             transcript: self.transcript,
                             suite: self.suite,
                             key_schedule: key_schedule_traffic,
                             send_tickets: self.send_tickets,
-                            message_already_in_transcript: false,
                         }))
                     } else {
-                        Ok(Box::new(ExpectCertificateOrCompressedCertificate {
+                        Ok(Box::new(ExpectFinished {
                             config: self.config,
                             transcript: self.transcript,
                             suite: self.suite,
@@ -478,25 +513,6 @@ mod client_hello {
                             send_tickets: self.send_tickets,
                         }))
                     }
-                } else if doing_early_data == EarlyDataDecision::Accepted && !cx.common.is_quic() {
-                    // Not used for QUIC: RFC 9001 §8.3: Clients MUST NOT send the EndOfEarlyData
-                    // message. A server MUST treat receipt of a CRYPTO frame in a 0-RTT packet as a
-                    // connection error of type PROTOCOL_VIOLATION.
-                    Ok(Box::new(ExpectEarlyData {
-                        config: self.config,
-                        transcript: self.transcript,
-                        suite: self.suite,
-                        key_schedule: key_schedule_traffic,
-                        send_tickets: self.send_tickets,
-                    }))
-                } else {
-                    Ok(Box::new(ExpectFinished {
-                        config: self.config,
-                        transcript: self.transcript,
-                        suite: self.suite,
-                        key_schedule: key_schedule_traffic,
-                        send_tickets: self.send_tickets,
-                    }))
                 }
             }
         }
@@ -511,6 +527,7 @@ mod client_hello {
         share_and_kxgroup: (&KeyShareEntry, &'static dyn SupportedKxGroup),
         chosen_psk_idx: Option<usize>,
         resuming_psk: Option<&[u8]>,
+        authkem_psk_ss: Option<Vec<u8>>,
         config: &ServerConfig,
     ) -> Result<KeyScheduleHandshake, Error> {
         let mut extensions = Vec::new();
@@ -531,6 +548,10 @@ mod client_hello {
             ckx.pub_key,
         )));
         extensions.push(ServerExtension::SupportedVersions(ProtocolVersion::TLSv1_3));
+
+        if authkem_psk_ss.is_some() {
+            extensions.push(ServerExtension::StoredAuthKey);
+        }
 
         if let Some(psk_idx) = chosen_psk_idx {
             extensions.push(ServerExtension::PresharedKey(psk_idx as u16));
@@ -563,6 +584,16 @@ mod client_hello {
         let key_schedule_pre_handshake = if let Some(psk) = resuming_psk {
             let early_key_schedule = KeyScheduleEarly::new(suite, psk);
             early_key_schedule.client_early_traffic_secret(
+                &client_hello_hash,
+                &*config.key_log,
+                &randoms.client,
+                cx.common,
+            );
+
+            KeySchedulePreHandshake::from(early_key_schedule)
+        } else if let Some(authkem_psk_ss) = authkem_psk_ss {
+            let early_key_schedule = KeyScheduleEarly::new(suite, &authkem_psk_ss);
+            early_key_schedule.client_early_handshake_traffic_secret(
                 &client_hello_hash,
                 &*config.key_log,
                 &randoms.client,
@@ -640,6 +671,7 @@ mod client_hello {
         client_hello: &ClientHelloPayload,
         resumedata: Option<&persist::ServerSessionValue>,
         suite: &'static Tls13CipherSuite,
+        authkem_psk_ss: Option<Vec<u8>>,
         config: &ServerConfig,
     ) -> EarlyDataDecision {
         let early_data_requested = client_hello.early_data_extension_offered();
@@ -648,6 +680,9 @@ mod client_hello {
             false => EarlyDataDecision::Disabled,
         };
 
+        if authkem_psk_ss.is_some() {
+            return EarlyDataDecision::Accepted;
+        }
         let Some(resume) = resumedata else {
             // never any early data if not resuming.
             return rejected_or_disabled;
@@ -699,12 +734,14 @@ mod client_hello {
         hello: &ClientHelloPayload,
         resumedata: Option<&persist::ServerSessionValue>,
         extra_exts: Vec<ServerExtension>,
+        authkem_psk_ss: Option<Vec<u8>>,
         config: &ServerConfig,
     ) -> Result<EarlyDataDecision, Error> {
         let mut ep = hs::ExtensionProcessing::new();
         ep.process_common(config, cx, ocsp_response, hello, resumedata, extra_exts)?;
 
-        let early_data = decide_if_early_data_allowed(cx, hello, resumedata, suite, config);
+        let early_data =
+            decide_if_early_data_allowed(cx, hello, resumedata, suite, authkem_psk_ss, config);
         if early_data == EarlyDataDecision::Accepted {
             ep.exts.push(ServerExtension::EarlyData);
         }

@@ -24,3 +24,11 @@ path = "examples/client_auth.rs"
 [[example]]
 name = "server_full"
 path = "examples/server_full.rs"
+
+[[example]]
+name = "client_psk"
+path = "examples/client_psk.rs"
+
+[[example]]
+name = "server_psk"
+path = "examples/server_full_psk.rs"

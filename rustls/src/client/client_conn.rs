@@ -7,8 +7,6 @@ use pki_types::{ServerName, UnixTime};
 
 use super::handy::NoClientSessionStorage;
 use super::hs;
-#[cfg(feature = "std")]
-use crate::WantsVerifier;
 use crate::builder::ConfigBuilder;
 use crate::client::{EchMode, EchStatus};
 use crate::common_state::{CommonState, Protocol, Side};
@@ -26,9 +24,12 @@ use crate::sync::Arc;
 use crate::time_provider::DefaultTimeProvider;
 use crate::time_provider::TimeProvider;
 use crate::unbuffered::{EncryptError, TransmitTlsData};
+use crate::verify::AuthKemPskKey;
+#[cfg(feature = "std")]
+use crate::WantsVerifier;
+use crate::{compress, sign, verify, versions, KeyLog, WantsVersions};
 #[cfg(doc)]
-use crate::{DistinguishedName, crypto};
-use crate::{KeyLog, WantsVersions, compress, sign, verify, versions};
+use crate::{crypto, DistinguishedName};
 
 /// A trait for the ability to store client session data, so that sessions
 /// can be resumed in future connections.
@@ -280,6 +281,9 @@ pub struct ClientConfig {
 
     /// How to offer Encrypted Client Hello (ECH). The default is to not offer ECH.
     pub(super) ech_mode: Option<EchMode>,
+
+    /// Authkem psk key
+    pub authkem_psk_key: Option<Arc<dyn AuthKemPskKey>>,
 }
 
 impl ClientConfig {
@@ -527,8 +531,8 @@ pub enum Tls12Resumption {
 
 /// Container for unsafe APIs
 pub(super) mod danger {
-    use super::ClientConfig;
     use super::verify::ServerCertVerifier;
+    use super::ClientConfig;
     use crate::sync::Arc;
 
     /// Accessor for dangerous configuration options.
@@ -634,13 +638,13 @@ mod connection {
     use pki_types::ServerName;
 
     use super::ClientConnectionData;
-    use crate::ClientConfig;
     use crate::client::EchStatus;
     use crate::common_state::Protocol;
     use crate::conn::{ConnectionCommon, ConnectionCore};
     use crate::error::Error;
     use crate::suites::ExtractedSecrets;
     use crate::sync::Arc;
+    use crate::ClientConfig;
 
     /// Stub that implements io::Write and dispatches to `write_early_data`.
     pub struct WriteEarlyData<'a> {
@@ -971,6 +975,7 @@ pub struct ClientConnectionData {
     pub(super) early_data: EarlyData,
     pub(super) resumption_ciphersuite: Option<SupportedCipherSuite>,
     pub(super) ech_status: EchStatus,
+    pub(super) stored_auth_key: bool,
 }
 
 impl ClientConnectionData {
@@ -979,6 +984,7 @@ impl ClientConnectionData {
             early_data: EarlyData::new(),
             resumption_ciphersuite: None,
             ech_status: EchStatus::NotOffered,
+            stored_auth_key: false,
         }
     }
 }

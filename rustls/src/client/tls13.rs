@@ -44,13 +44,15 @@ use crate::tls13::{
     construct_client_verify_message, construct_server_verify_message, Tls13CipherSuite,
 };
 use crate::verify::{self, DigitallySignedStruct};
-use crate::{compress, crypto, server, x509, KeyLog, NamedGroup};
+use crate::{compress, crypto, server, x509, KeyLog, NamedGroup, SupportedCipherSuite};
 
 // Extensions we expect in plaintext in the ServerHello.
 static ALLOWED_PLAINTEXT_EXTS: &[ExtensionType] = &[
     ExtensionType::KeyShare,
     ExtensionType::PreSharedKey,
     ExtensionType::SupportedVersions,
+    ExtensionType::StoredAuthKey,
+    ExtensionType::EarlyAuth,
 ];
 
 // Only the intersection of things we offer, and those disallowed
@@ -97,8 +99,12 @@ pub(super) fn handle_server_hello(
             )
         })?;
 
-    let key_schedule_pre_handshake = match (server_hello.psk_index(), early_key_schedule) {
-        (Some(selected_psk), Some(early_key_schedule)) => {
+    let key_schedule_pre_handshake = match (
+        server_hello.psk_index(),
+        early_key_schedule,
+        server_hello.authkem_psk(),
+    ) {
+        (Some(selected_psk), Some(early_key_schedule), false) => {
             match &resuming_session {
                 Some(resuming) => {
                     let Some(resuming_suite) = suite.can_resume_from(resuming.suite()) else {
@@ -139,10 +145,15 @@ pub(super) fn handle_server_hello(
             }
             KeySchedulePreHandshake::from(early_key_schedule)
         }
+        (None, Some(early_key_schedule), true) => {
+            debug!("Reanudando via StoredAuthKey");
+            KeySchedulePreHandshake::from(early_key_schedule)
+        }
         _ => {
             debug!("Not resuming");
             // Discard the early data key schedule.
             cx.data.early_data.rejected();
+            cx.data.stored_auth_key = false;
             cx.common.early_traffic = false;
             resuming_session.take();
             KeySchedulePreHandshake::new(suite)
@@ -369,7 +380,7 @@ pub(super) fn derive_early_traffic_secret(
     key_log: &dyn KeyLog,
     cx: &mut ClientContext<'_>,
     resuming_suite: &'static Tls13CipherSuite,
-    early_key_schedule: &KeyScheduleEarly,
+    early_key_schedule: &mut KeyScheduleEarly,
     sent_tls13_fake_ccs: &mut bool,
     transcript_buffer: &HandshakeHashBuffer,
     client_random: &[u8; 32],
@@ -378,16 +389,36 @@ pub(super) fn derive_early_traffic_secret(
     emit_fake_ccs(sent_tls13_fake_ccs, cx.common);
 
     let client_hello_hash = transcript_buffer.hash_given(resuming_suite.common.hash_provider, &[]);
-    early_key_schedule.client_early_traffic_secret(
-        &client_hello_hash,
-        key_log,
-        client_random,
-        cx.common,
-    );
 
+    if cx.data.stored_auth_key {
+        debug!("AUTHKEM PSK SHARED SECRET FOUND, DERIVING NEW KEYS");
+        early_key_schedule.client_early_handshake_traffic_secret(
+            &client_hello_hash,
+            key_log,
+            client_random,
+            cx.common,
+        );
+    } else {
+        early_key_schedule.client_early_traffic_secret(
+            &client_hello_hash,
+            key_log,
+            client_random,
+            cx.common,
+        );
+    }
     // Now the client can send encrypted early data
     cx.common.early_traffic = true;
     trace!("Starting early data traffic");
+}
+
+pub(super) fn fill_in_authkem_psk_ss(
+    suite: &'static Tls13CipherSuite,
+    cx: &mut ClientContext<'_>,
+    ehss: &[u8],
+) -> KeyScheduleEarly {
+    debug!("Creating KeyScheduleEarly with AuthKemPsk Shared Secret");
+    cx.data.stored_auth_key = true;
+    KeyScheduleEarly::new(suite, ehss)
 }
 
 pub(super) fn emit_fake_ccs(sent_tls13_fake_ccs: &mut bool, common: &mut CommonState) {
@@ -513,6 +544,39 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
             }
         }
 
+        if cx.data.stored_auth_key {
+            let was_early_traffic = cx.common.early_traffic;
+            if was_early_traffic {
+                if exts.early_data_extension_offered() {
+                    cx.data.early_data.accepted();
+                } else {
+                    cx.data.early_data.rejected();
+                    cx.common.early_traffic = false;
+                }
+            }
+            if was_early_traffic && !cx.common.early_traffic {
+                // If no early traffic, set the encryption key for handshakes
+                self.key_schedule
+                    .set_handshake_encrypter(cx.common);
+            }
+            cx.common.handshake_kind = Some(HandshakeKind::Resumed);
+
+            let cert_verified = verify::ServerCertVerified::assertion();
+            let sig_verified = verify::HandshakeSignatureValid::assertion();
+            return Ok(Box::new(ExpectFinished {
+                config: self.config,
+                server_name: self.server_name,
+                randoms: self.randoms,
+                suite: self.suite,
+                transcript: self.transcript,
+                key_schedule: self.key_schedule,
+                client_auth: None,
+                cert_verified,
+                sig_verified,
+                ech_retry_configs,
+            }));
+        }
+
         match self.resuming_session {
             Some(resuming_session) => {
                 let was_early_traffic = cx.common.early_traffic;
@@ -556,7 +620,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                 }))
             }
             _ => {
-                if exts.early_data_extension_offered() {
+                if exts.early_data_extension_offered() && !cx.data.stored_auth_key {
                     return Err(PeerMisbehaved::EarlyDataExtensionWithoutResumption.into());
                 }
                 cx.common
@@ -1609,7 +1673,6 @@ fn emit_end_of_early_data_tls13(transcript: &mut HandshakeHash, common: &mut Com
             payload: HandshakePayload::EndOfEarlyData,
         }),
     };
-
     transcript.add_message(&m);
     common.send_msg(m, true);
 }
