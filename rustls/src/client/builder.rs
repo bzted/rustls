@@ -192,6 +192,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             cert_decompressors: compress::default_cert_decompressors().to_vec(),
             ech_mode: self.state.client_ech_mode,
             authkem_psk_key: self.state.authkem_psk_key,
+            early_auth: false,
         }
     }
 }

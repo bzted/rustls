@@ -1192,6 +1192,11 @@ impl ClientHelloPayload {
             .is_some()
     }
 
+    pub(crate) fn early_auth(&self) -> bool {
+        self.find_extension(ExtensionType::EarlyAuth)
+            .is_some()
+    }
+
     pub(crate) fn stored_auth_key(&self) -> Option<&StoredAuthKey> {
         self.find_extension(ExtensionType::StoredAuthKey)
             .and_then(|ext| {
@@ -1489,6 +1494,11 @@ impl ServerHelloPayload {
 
     pub(crate) fn authkem_psk(&self) -> bool {
         self.find_extension(ExtensionType::StoredAuthKey)
+            .is_some()
+    }
+
+    pub(crate) fn early_auth(&self) -> bool {
+        self.find_extension(ExtensionType::EarlyAuth)
             .is_some()
     }
 

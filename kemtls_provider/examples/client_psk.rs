@@ -56,6 +56,9 @@ fn main() {
     debug!("TRYING PSK");
     client_config.enable_early_data = true;
 
+    // enable early auth
+    //client_config.early_auth = true;
+
     let server_name = "servername".try_into().unwrap();
     let mut client = ClientConnection::new(Arc::new(client_config), server_name).unwrap();
     debug!("Connecting to server at 127.0.0.1:8443...");

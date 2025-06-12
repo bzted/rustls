@@ -5,7 +5,6 @@ use alloc::vec::Vec;
 pub(super) use client_hello::CompleteClientHelloHandling;
 use pki_types::{CertificateDer, UnixTime};
 use subtle::ConstantTimeEq;
-use x509_parser::der_parser::rusticata_macros::debug;
 
 use super::hs::{self, HandshakeHashOrBuffer, ServerContext};
 use super::server_conn::ServerConnectionData;
@@ -33,13 +32,13 @@ use crate::server::ServerConfig;
 use crate::suites::PartiallyExtractedSecrets;
 use crate::sync::Arc;
 use crate::tls13::key_schedule::{
-    self, KeyScheduleAuthenticatedHandshake, KeyScheduleHandshake, KeyScheduleMainSecret,
+    KeyScheduleAuthenticatedHandshake, KeyScheduleHandshake, KeyScheduleMainSecret,
     KeyScheduleTraffic, KeyScheduleTrafficWithClientFinishedPending, ResumptionSecret,
 };
 use crate::tls13::{
     construct_client_verify_message, construct_server_verify_message, Tls13CipherSuite,
 };
-use crate::{compress, rand, verify, NamedGroup};
+use crate::{compress, rand, verify};
 
 mod client_hello {
     use super::*;
@@ -346,6 +345,8 @@ mod client_hello {
                     }
                 }
             }
+
+            let doing_early_auth = authkem_psk_ss.is_some() && client_hello.early_auth();
             let full_handshake = resumedata.is_none() && authkem_psk_ss.is_none();
             self.transcript.add_message(chm);
             let key_schedule = emit_server_hello(
@@ -360,6 +361,7 @@ mod client_hello {
                     .as_ref()
                     .map(|x| &x.master_secret.0[..]),
                 authkem_psk_ss.clone(),
+                doing_early_auth,
                 &self.config,
             )?;
             if !self.done_retry {
@@ -456,6 +458,19 @@ mod client_hello {
                     }))
                 }
                 _ => {
+                    if doing_early_auth {
+                        debug!("DOING EARLY AUTH");
+                        flight.finish(cx.common);
+                        return Ok(Box::new(ExpectEarlyAuthCertificate {
+                            config: self.config,
+                            transcript: self.transcript,
+                            randoms: self.randoms,
+                            suite: self.suite,
+                            key_schedule,
+                            send_tickets: self.send_tickets,
+                        }));
+                    }
+
                     cx.common.check_aligned_handshake()?;
                     let key_schedule_traffic =
                         emit_finished_tls13(flight, &self.randoms, cx, key_schedule, &self.config);
@@ -528,6 +543,7 @@ mod client_hello {
         chosen_psk_idx: Option<usize>,
         resuming_psk: Option<&[u8]>,
         authkem_psk_ss: Option<Vec<u8>>,
+        doing_early_auth: bool,
         config: &ServerConfig,
     ) -> Result<KeyScheduleHandshake, Error> {
         let mut extensions = Vec::new();
@@ -551,6 +567,10 @@ mod client_hello {
 
         if authkem_psk_ss.is_some() {
             extensions.push(ServerExtension::StoredAuthKey);
+
+            if doing_early_auth {
+                extensions.push(ServerExtension::EarlyAuth);
+            }
         }
 
         if let Some(psk_idx) = chosen_psk_idx {
@@ -1262,7 +1282,6 @@ impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
                 suite: self.suite,
                 key_schedule,
                 randoms: self.randoms,
-                client_auth: None,
                 send_tickets: self.send_tickets,
             }))
         }
@@ -1321,16 +1340,13 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
                 suite: self.suite,
                 key_schedule,
                 randoms: self.randoms,
-                client_auth: None,
                 send_tickets: self.send_tickets,
             }));
         }
 
-        let (leaf_cert, ca_certs) = owned_chain
+        let (leaf_cert, _ca_certs) = owned_chain
             .split_first()
             .ok_or(Error::NoCertificatesPresented)?;
-
-        let now = self.config.current_time()?;
 
         let client_pk = get_client_pk_from_cert(leaf_cert)?;
 
@@ -1365,7 +1381,6 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
             suite: self.suite,
             key_schedule,
             randoms: self.randoms,
-            client_auth: Some(client_ss),
             send_tickets: self.send_tickets,
         }))
     }
@@ -1381,7 +1396,6 @@ struct ExpectClientFinished {
     suite: &'static Tls13CipherSuite,
     key_schedule: KeyScheduleMainSecret,
     randoms: ConnectionRandoms,
-    client_auth: Option<Vec<u8>>,
     send_tickets: usize,
 }
 impl ExpectClientFinished {
@@ -1643,6 +1657,104 @@ impl State<ServerConnectionData> for ExpectEarlyData {
                 &[HandshakeType::EndOfEarlyData],
             )),
         }
+    }
+
+    fn into_owned(self: Box<Self>) -> hs::NextState<'static> {
+        self
+    }
+}
+
+struct ExpectEarlyAuthCertificate {
+    config: Arc<ServerConfig>,
+    transcript: HandshakeHash,
+    randoms: ConnectionRandoms,
+    suite: &'static Tls13CipherSuite,
+    key_schedule: KeyScheduleHandshake,
+    send_tickets: usize,
+}
+
+impl State<ServerConnectionData> for ExpectEarlyAuthCertificate {
+    fn handle<'m>(
+        mut self: Box<Self>,
+        cx: &mut ServerContext<'_>,
+        m: Message<'m>,
+    ) -> hs::NextStateOrError<'m>
+    where
+        Self: 'm,
+    {
+        //self.transcript.add_message(&m);
+
+        let cert_chain = require_handshake_msg_move!(
+            m,
+            HandshakeType::Certificate,
+            HandshakePayload::CertificateTls13
+        )?;
+
+        let owned_chain = cert_chain
+            .into_certificate_chain()
+            .into_owned();
+
+        let (leaf_cert, _ca_certs) = owned_chain
+            .split_first()
+            .ok_or(Error::NoCertificatesPresented)?;
+
+        let client_pk = get_client_pk_from_cert(leaf_cert)?;
+
+        // encapsulate to client public key
+        let (ct, client_ss) = self
+            .config
+            .verifier
+            .encapsulate(&client_pk)?;
+
+        let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
+
+        trace!("sending KemEncapsulation to clients early auth certificate");
+        flight.add(HandshakeMessagePayload {
+            typ: HandshakeType::KemEncapsulation,
+            payload: HandshakePayload::KemEncapsulation(KemEncapsulationPayload {
+                certificate_req_context: PayloadU8::new(Vec::new()),
+                ciphertext: PayloadU16::new(ct),
+            }),
+        });
+        cx.common.peer_certificates = Some(owned_chain.clone());
+
+        cx.common.check_aligned_handshake()?;
+
+        let handshake_hash = flight.transcript.current_hash();
+        let verify_data = self
+            .key_schedule
+            .sign_server_finish(&handshake_hash);
+        let verify_data_payload = Payload::new(verify_data.as_ref());
+
+        let fin = HandshakeMessagePayload {
+            typ: HandshakeType::Finished,
+            payload: HandshakePayload::Finished(verify_data_payload),
+        };
+
+        trace!("sending finished {:?}", fin);
+        flight.add(fin);
+        let hash_at_server_fin = flight.transcript.current_hash();
+
+        flight.finish(cx.common);
+
+        let key_schedule = self
+            .key_schedule
+            .into_early_auth_traffic_with_client_finished_pending(
+                Some(&client_ss),
+                hash_at_server_fin,
+                &*self.config.key_log,
+                &self.randoms.client,
+                cx.common,
+            );
+
+        debug!("SERVER GOING INTO EXPECT EARLY DATA");
+        Ok(Box::new(ExpectEarlyData {
+            config: self.config,
+            transcript: self.transcript,
+            suite: self.suite,
+            key_schedule,
+            send_tickets: self.send_tickets,
+        }))
     }
 
     fn into_owned(self: Box<Self>) -> hs::NextState<'static> {

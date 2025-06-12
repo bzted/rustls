@@ -6,7 +6,6 @@ use log::debug;
 
 use crate::common_state::{CommonState, Side};
 use crate::crypto::cipher::{AeadKey, Iv, MessageDecrypter, Tls13AeadAlgorithm};
-use crate::crypto::hmac::Key;
 use crate::crypto::tls13::{expand, Hkdf, HkdfExpander, OkmBlock, OutputLengthError};
 use crate::crypto::{hash, hmac, SharedSecret};
 use crate::error::Error;
@@ -456,6 +455,73 @@ impl KeyScheduleHandshake {
         }
 
         KeyScheduleAuthenticatedHandshake { ks: self.ks }
+    }
+
+    pub(crate) fn into_early_auth_traffic_with_client_finished_pending(
+        mut self,
+        client_ss: Option<&[u8]>,
+        hs_hash: hash::Output,
+        key_log: &dyn KeyLog,
+        client_random: &[u8; 32],
+        common: &mut CommonState,
+    ) -> KeyScheduleTrafficWithClientFinishedPending {
+        debug_assert_eq!(common.side, Side::Server);
+
+        if let Some(client_ss) = client_ss {
+            self.ks.input_secret(client_ss);
+        } else {
+            self.ks.input_empty();
+        }
+
+        let traffic = KeyScheduleTraffic::new(self.ks, hs_hash, key_log, client_random);
+        let (_client_secret, server_secret) = (
+            &traffic.current_client_traffic_secret,
+            &traffic.current_server_traffic_secret,
+        );
+
+        traffic
+            .ks
+            .set_encrypter(server_secret, common);
+
+        if common.is_quic() {
+            common.quic.traffic_secrets = Some(quic::Secrets::new(
+                _client_secret.clone(),
+                server_secret.clone(),
+                traffic.ks.suite,
+                traffic.ks.suite.quic.unwrap(),
+                common.side,
+                common.quic.version,
+            ));
+        }
+
+        KeyScheduleTrafficWithClientFinishedPending {
+            handshake_client_traffic_secret: self.client_handshake_traffic_secret,
+            traffic,
+        }
+    }
+
+    pub(crate) fn into_early_auth_pre_finished_client_traffic(
+        mut self,
+        client_ss: Option<&[u8]>,
+        pre_finished_hash: hash::Output,
+        handshake_hash: hash::Output,
+        key_log: &dyn KeyLog,
+        client_random: &[u8; 32],
+        common: &mut CommonState,
+    ) -> (KeyScheduleClientBeforeFinished, hmac::Tag) {
+        debug_assert_eq!(common.side, Side::Client);
+
+        if let Some(client_ss) = client_ss {
+            self.ks.input_secret(client_ss);
+        } else {
+            self.ks.input_empty();
+        };
+
+        let traffic = KeyScheduleTraffic::new(self.ks, pre_finished_hash, key_log, client_random);
+        let tag = traffic
+            .ks
+            .sign_finish(&self.client_handshake_traffic_secret, &handshake_hash);
+        (KeyScheduleClientBeforeFinished { traffic }, tag)
     }
 }
 

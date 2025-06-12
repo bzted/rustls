@@ -3,7 +3,6 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Deref;
-use x509_parser::der_parser::rusticata_macros::debug;
 
 use pki_types::ServerName;
 
@@ -15,6 +14,7 @@ use super::Tls12Resumption;
 use crate::bs_debug;
 use crate::check::inappropriate_handshake_message;
 use crate::client::client_conn::ClientConnectionData;
+use crate::client::common::ClientAuthDetails;
 use crate::client::common::ClientHelloDetails;
 use crate::client::ech::EchState;
 use crate::client::{tls13, ClientConfig, EchMode, EchStatus};
@@ -31,6 +31,7 @@ use crate::msgs::base::PayloadU8;
 use crate::msgs::enums::{
     CertificateType, Compression, ECPointFormat, ExtensionType, PSKKeyExchangeMode,
 };
+use crate::msgs::handshake::EarlyAuth;
 use crate::msgs::handshake::StoredAuthKey;
 use crate::msgs::handshake::{
     CertificateStatusRequest, ClientExtension, ClientHelloPayload, ClientSessionTicket,
@@ -421,6 +422,12 @@ fn emit_client_hello_for_retry(
                     ciphertext: PayloadU16::new(ct),
                     key_fingerprint: PayloadU8::new(Vec::new()), // calcular huella correctamente
                 }));
+
+                if config.early_auth {
+                    debug!("EarlyAuth: true, sending EarlyAuth extension");
+                    exts.push(ClientExtension::EarlyAuth(EarlyAuth {}));
+                }
+
                 let max_early_data_size = 1000; //cambiar
                 if config.enable_early_data {
                     cx.data
@@ -637,6 +644,40 @@ fn emit_client_hello_for_retry(
         );
         schedule
     });
+
+    if config.early_auth {
+        let auth_details = tls13::manage_early_auth_details(config.clone());
+        match auth_details {
+            ClientAuthDetails::Verify {
+                certkey,
+                auth_context_tls13,
+                ..
+            } => {
+                let certs = Some(&certkey)
+                    .map(|ck| ck.cert.as_ref())
+                    .unwrap_or(&[][..]);
+                let mut cert_payload =
+                    crate::msgs::handshake::CertificatePayloadTls13::new(certs.iter(), None);
+                cert_payload.context = PayloadU8::new(auth_context_tls13.unwrap_or_default());
+
+                let cert = HandshakeMessagePayload {
+                    typ: HandshakeType::Certificate,
+                    payload: HandshakePayload::CertificateTls13(cert_payload),
+                };
+
+                let msg = Message {
+                    version: ProtocolVersion::TLSv1_2,
+                    payload: MessagePayload::handshake(cert),
+                };
+                debug!("Sending Certificate under Early Traffic keys");
+                cx.common.send_msg(msg, true);
+            }
+
+            ClientAuthDetails::Empty { .. } => {
+                debug!("Client Auth Details empty, early certificate couldn't be sent");
+            }
+        }
+    }
 
     let next = ExpectServerHello {
         input,

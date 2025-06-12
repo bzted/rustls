@@ -282,8 +282,11 @@ pub struct ClientConfig {
     /// How to offer Encrypted Client Hello (ECH). The default is to not offer ECH.
     pub(super) ech_mode: Option<EchMode>,
 
-    /// Authkem psk key
+    /// AuthKem Psk key. Empty by default
     pub authkem_psk_key: Option<Arc<dyn AuthKemPskKey>>,
+
+    /// AuthKem Psk early auth. false by default
+    pub early_auth: bool,
 }
 
 impl ClientConfig {
@@ -976,6 +979,7 @@ pub struct ClientConnectionData {
     pub(super) resumption_ciphersuite: Option<SupportedCipherSuite>,
     pub(super) ech_status: EchStatus,
     pub(super) stored_auth_key: bool,
+    pub(super) early_auth: bool,
 }
 
 impl ClientConnectionData {
@@ -985,6 +989,7 @@ impl ClientConnectionData {
             resumption_ciphersuite: None,
             ech_status: EchStatus::NotOffered,
             stored_auth_key: false,
+            early_auth: false,
         }
     }
 }
