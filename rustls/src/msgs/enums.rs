@@ -230,6 +230,13 @@ enum_builder! {
         MLKEM1024 => 0x0202,
         secp256r1MLKEM768 => 0x11eb,
         X25519MLKEM768 => 0x11ec,
+        BikeL1 => 0x0203,   // Test value, IANA TBD
+        BikeL3 => 0x0204,   // Test value, IANA TBD
+        BikeL5 => 0x0205,   // Test value, IANA TBD
+        Hqc128 => 0x0206,   // Test value, IANA TBD
+        Hqc192 => 0x0207,   // Test value, IANA TBD
+        Hqc256 => 0x0208,   // Test value, IANA TBD
+        NtruPrimeStrup761 => 0x0209,    // Test value, IANA TBD
     }
 }
 
