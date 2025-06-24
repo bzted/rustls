@@ -21,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .keypair()
         .expect("Failed to generate KEM key pair");
 
+    fs::create_dir_all("keys").expect("Couldn't create keys directory");
     // Write servers pk to a file
     fs::write("keys/spk.bin", &public_key).expect("failed to write servers public key");
 

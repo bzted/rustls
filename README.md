@@ -178,6 +178,23 @@ The essential operations for the KEM-based handshake are:
 * Encapsulation: Generates a ciphertext and shared secret from the peer's public key
 * Decapsulation: Recovers the shared secret from the ciphertext using its private key
 
+# v0.2.0
+
+This version adds support for Authkem PSK, based on the IETF draft [authkem-psk](https://datatracker.ietf.org/doc/draft-wiggers-tls-authkem-psk/). 
+It implements an abbreviated handshake with early data possibility and allows early client auth, as described in the draft. 
+
+Examples of client and server using this flow are available in the `kemtls_provider/examples` directory.
+
+## Early Auth
+
+To enable early client authentication, you must indicate it while configurating clients, as shown in the `client_psk.rs` example.
+
+You can indicate it by setting the `early_auth` flag to true. 
+
+```
+// Enable early auth
+client_config.early_auth = true;
+```
 ### Platform support
 
 While Rustls itself is platform independent, by default it uses [`aws-lc-rs`] for implementing
