@@ -73,28 +73,32 @@ This design allows for gradual adoption and testing of the post-quantum secure p
 
 # Usage
 
-A custom cryptography provider is available in the `kemtls_provider` directory, along with example client and server implementations. To run the examples 
+A custom cryptography provider is available in the `kemtls_provider` directory, along with example client and server implementations. You can explicitly state which algorithm you want to be used for key encapsulation and for authentication. You may use different algorithms for each process. If `group` isn't provided, the default key exchange groups will be used. They can be found in the `algorithms.rs` file. If `authkem` isn't provided, MLKEM768 will be used as the default KEM algorithm for authentication.
+
+Currently available algorithms are: MLKEM512, MLKEM768, MLKEM1024, BikeL1, BikeL3, BikeL5, Hqc128, Hqc192, Hqc256, NtruPrimeSntrup761
+
+To run the examples 
 
 ```
 # Run the server example
-cargo run --example server
+cargo run --example server -- -group mlkem768 -authkem bikel3
 
 # Run the client example
-cargo run --example client
+cargo run --example client -- -group mlkem768 -authkem bikel3
 
 # To test mutual authentication, run:
-cargo run --example server_full
+cargo run --example server_full -- -group mlkem768 -authkem bikel3
 
-cargo run --example client_auth
+cargo run --example client_auth -- -group mlkem768 -authkem bikel3
 ```
 
 For additional debuggin information, you can enable verbose logging:
 ```
 # Run the server example
-RUST_LOG=debug cargo run --example server
+RUST_LOG=debug cargo run --example server -- -group mlkem768 -authkem bikel3
 
 # Run the client example
-RUST_LOG=debug cargo run --example client
+RUST_LOG=debug cargo run --example client -- -group mlkem768 -authkem bikel3
 ```
 
 The examples in the `kemtls_provider/examples` directory demonstrate how to configure the provider to use KEM-based flow instead of traditional TLS 1.3.
@@ -187,13 +191,11 @@ Examples of client and server using this flow are available in the `kemtls_provi
 
 ## Early Auth
 
-To enable early client authentication, you must indicate it while configurating clients, as shown in the `client_psk.rs` example.
-
-You can indicate it by setting the `early_auth` flag to true. 
+To enable early client authentication, you may indicate it by adding the `early_auth` flag when running the client and server. 
 
 ```
-// Enable early auth
-client_config.early_auth = true;
+cargo run --example client_auth -- -group mlkem768 -authkem bikel3 -early_auth
+
 ```
 ### Platform support
 

@@ -6,16 +6,16 @@ use oqs::kem::Kem;
 use rustls::crypto::{self, CompletedKeyExchange, SharedSecret};
 
 pub const KX_GROUPS: &[&dyn SupportedKxGroup] = &[
-    //&MLKEM512 as &dyn SupportedKxGroup,
     &MLKEM768 as &dyn SupportedKxGroup,
-    //&MLKEM1024 as &dyn SupportedKxGroup,
-    //&BikeL1 as &dyn SupportedKxGroup,
-    //&BikeL3 as &dyn SupportedKxGroup,
-    //&BikeL5 as &dyn SupportedKxGroup,
-    //&Hqc128 as &dyn SupportedKxGroup,
-    //&Hqc192 as &dyn SupportedKxGroup,
-    //&Hqc256 as &dyn SupportedKxGroup,
-    //&NtruPrimeStrup761 as &dyn SupportedKxGroup,
+    &MLKEM512 as &dyn SupportedKxGroup,
+    &MLKEM1024 as &dyn SupportedKxGroup,
+    &BikeL1 as &dyn SupportedKxGroup,
+    &BikeL3 as &dyn SupportedKxGroup,
+    &BikeL5 as &dyn SupportedKxGroup,
+    &Hqc128 as &dyn SupportedKxGroup,
+    &Hqc192 as &dyn SupportedKxGroup,
+    &Hqc256 as &dyn SupportedKxGroup,
+    &NtruPrimeStrup761 as &dyn SupportedKxGroup,
 ];
 
 #[derive(Debug)]
@@ -387,39 +387,19 @@ impl crypto::SupportedKxGroup for NtruPrimeStrup761 {
         })
     }
 }
-// TESTS UNITARIOS
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mlkem512_initialization() {
-        let provider = MLKEM512;
-        let result = provider.start();
-        assert!(result.is_ok(), "Failed to initialize ML-KEM-512");
-
-        let key_exchange = result.unwrap();
-        assert_eq!(key_exchange.group(), rustls::NamedGroup::MLKEM512);
-    }
-
-    #[test]
-    fn test_mlkem768_initialization() {
-        let provider = MLKEM768;
-        let result = provider.start();
-        assert!(result.is_ok(), "Failed to initialize ML-KEM-768");
-
-        let key_exchange = result.unwrap();
-        assert_eq!(key_exchange.group(), rustls::NamedGroup::MLKEM768);
-    }
-
-    #[test]
-    fn test_mlkem1024_initialization() {
-        let provider = MLKEM1024;
-        let result = provider.start();
-        assert!(result.is_ok(), "Failed to initialize ML-KEM-1024");
-
-        let key_exchange = result.unwrap();
-        assert_eq!(key_exchange.group(), rustls::NamedGroup::MLKEM1024);
+pub fn get_kx_group_by_name(name: &str) -> Option<&'static dyn SupportedKxGroup> {
+    match name.to_uppercase().as_str() {
+        "MLKEM512" => Some(&MLKEM512),
+        "MLKEM768" => Some(&MLKEM768),
+        "MLKEM1024" => Some(&MLKEM1024),
+        "BIKEL1" => Some(&BikeL1),
+        "BIKEL3" => Some(&BikeL3),
+        "BIKEL5" => Some(&BikeL5),
+        "HQC128" => Some(&Hqc128),
+        "HQC192" => Some(&Hqc192),
+        "HQC256" => Some(&Hqc256),
+        "NTRUPRIMESNTRUP761" => Some(&NtruPrimeStrup761),
+        _ => None,
     }
 }

@@ -5,11 +5,15 @@ use rustls::Error;
 #[derive(Debug)]
 pub struct PskKey {
     server_pk: Vec<u8>,
+    algorithm: oqs::kem::Algorithm,
 }
 
 impl PskKey {
-    pub fn new(server_pk: Vec<u8>) -> Self {
-        Self { server_pk }
+    pub fn new(server_pk: Vec<u8>, algorithm: oqs::kem::Algorithm) -> Self {
+        Self {
+            server_pk,
+            algorithm,
+        }
     }
 }
 
@@ -17,7 +21,7 @@ impl AuthKemPskKey for PskKey {
     fn encapsulate(&self) -> Result<(Vec<u8>, Vec<u8>), Error> {
         debug!("About to encapsulate to servers public key");
 
-        let kem = oqs::kem::Kem::new(oqs::kem::Algorithm::MlKem768)
+        let kem = oqs::kem::Kem::new(self.algorithm)
             .map_err(|_| Error::General("Failed to create KEM instance".into()))?;
 
         let pk = kem

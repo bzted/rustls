@@ -5,7 +5,15 @@ use rustls::server::danger::ClientCertVerifier;
 use rustls::Error;
 
 #[derive(Debug)]
-pub struct ClientVerifier;
+pub struct ClientVerifier {
+    algorithm: oqs::kem::Algorithm,
+}
+
+impl ClientVerifier {
+    pub fn new(algorithm: oqs::kem::Algorithm) -> Self {
+        ClientVerifier { algorithm }
+    }
+}
 
 impl ServerCertVerifier for ClientVerifier {
     fn verify_server_cert(
@@ -67,7 +75,7 @@ impl ServerCertVerifier for ClientVerifier {
     fn encapsulate(&self, server_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
         debug!("About to encapsulate to servers public key");
 
-        let kem = oqs::kem::Kem::new(oqs::kem::Algorithm::MlKem768)
+        let kem = oqs::kem::Kem::new(self.algorithm)
             .map_err(|_| Error::General("Failed to create KEM instance".into()))?;
 
         let pk = kem
@@ -84,12 +92,14 @@ impl ServerCertVerifier for ClientVerifier {
 #[derive(Debug)]
 pub struct ServerVerifier {
     root_hints: Vec<rustls::DistinguishedName>, // Decoded using x509-parser. Not used in AuthKem
+    algorithm: oqs::kem::Algorithm,
 }
 
 impl ServerVerifier {
-    pub fn new() -> Self {
+    pub fn new(algorithm: oqs::kem::Algorithm) -> Self {
         ServerVerifier {
             root_hints: vec![rustls::DistinguishedName::from(Vec::new())],
+            algorithm,
         }
     }
 }
@@ -150,7 +160,7 @@ impl ClientCertVerifier for ServerVerifier {
     fn encapsulate(&self, client_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
         debug!("About to encapsulate to clients public key");
 
-        let kem = oqs::kem::Kem::new(oqs::kem::Algorithm::MlKem768)
+        let kem = oqs::kem::Kem::new(self.algorithm)
             .map_err(|_| Error::General("Failed to create KEM instance".into()))?;
 
         let pk = kem
