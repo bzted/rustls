@@ -5,12 +5,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Deref;
 use core::{fmt, iter};
+use log::trace;
 
 use pki_types::{CertificateDer, DnsName};
 
 #[cfg(feature = "tls12")]
 use crate::crypto::ActiveKeyExchange;
 use crate::crypto::SecureRandom;
+use crate::dtls13::record_layer::ConnectionId;
 use crate::enums::{
     CertificateCompressionAlgorithm, CipherSuite, EchClientHelloType, HandshakeType,
     ProtocolVersion, SignatureScheme,
@@ -604,6 +606,7 @@ pub enum ClientExtension {
     AuthorityNames(Vec<DistinguishedName>),
     StoredAuthKey(StoredAuthKey), // Added extensions
     EarlyAuth(EarlyAuth),         // Added extensions
+    ConnectionId(ConnectionId),
     Unknown(UnknownExtension),
 }
 
@@ -636,6 +639,7 @@ impl ClientExtension {
             Self::AuthorityNames(_) => ExtensionType::CertificateAuthorities,
             Self::StoredAuthKey(_) => ExtensionType::StoredAuthKey,
             Self::EarlyAuth(_) => ExtensionType::EarlyAuth,
+            Self::ConnectionId(_) => ExtensionType::ConnectionId,
             Self::Unknown(r) => r.typ,
         }
     }
@@ -673,6 +677,7 @@ impl Codec<'_> for ClientExtension {
             Self::AuthorityNames(r) => r.encode(nested.buf),
             Self::StoredAuthKey(r) => r.encode(nested.buf),
             Self::EarlyAuth(_) => {} // EarlyAuth extension is empty
+            Self::ConnectionId(r) => r.encode(nested.buf),
             Self::Unknown(r) => r.encode(nested.buf),
         }
     }
@@ -785,6 +790,7 @@ pub enum ServerExtension {
     EncryptedClientHello(ServerEncryptedClientHello),
     StoredAuthKey,
     EarlyAuth,
+    ConnectionId(ConnectionId),
     Unknown(UnknownExtension),
 }
 
@@ -809,6 +815,7 @@ impl ServerExtension {
             Self::EncryptedClientHello(_) => ExtensionType::EncryptedClientHello,
             Self::StoredAuthKey => ExtensionType::StoredAuthKey,
             Self::EarlyAuth => ExtensionType::EarlyAuth,
+            Self::ConnectionId(_) => ExtensionType::ConnectionId,
             Self::Unknown(r) => r.typ,
         }
     }
@@ -839,6 +846,7 @@ impl Codec<'_> for ServerExtension {
             Self::EncryptedClientHello(r) => r.encode(nested.buf),
             Self::StoredAuthKey => 1u8.encode(nested.buf), // We send a '1'
             Self::EarlyAuth => {}                          // EarlyAuth extension is empty
+            Self::ConnectionId(r) => r.encode(nested.buf),
             Self::Unknown(r) => r.encode(nested.buf),
         }
     }
@@ -908,6 +916,8 @@ pub struct ClientHelloPayload {
     pub client_version: ProtocolVersion,
     pub random: Random,
     pub session_id: SessionId,
+    #[cfg(feature = "dtls13")]
+    pub legacy_cookie: PayloadU8,
     pub cipher_suites: Vec<CipherSuite>,
     pub compression_methods: Vec<Compression>,
     pub extensions: Vec<ClientExtension>,
@@ -923,6 +933,8 @@ impl Codec<'_> for ClientHelloPayload {
             client_version: ProtocolVersion::read(r)?,
             random: Random::read(r)?,
             session_id: SessionId::read(r)?,
+            #[cfg(feature = "dtls13")]
+            legacy_cookie: PayloadU8::empty(),
             cipher_suites: Vec::read(r)?,
             compression_methods: Vec::read(r)?,
             extensions: Vec::new(),
@@ -934,6 +946,7 @@ impl Codec<'_> for ClientHelloPayload {
 
         match (r.any_left(), ret.extensions.is_empty()) {
             (true, _) => Err(InvalidMessage::TrailingData("ClientHelloPayload")),
+
             (_, true) => Err(InvalidMessage::MissingData("ClientHelloPayload")),
             _ => Ok(ret),
         }
@@ -1184,6 +1197,14 @@ impl ClientHelloPayload {
         let last_extension = self.extensions.last_mut();
         if let Some(ClientExtension::PresharedKey(offer)) = last_extension {
             offer.binders[0] = PresharedKeyBinder::from(binder.into());
+        }
+    }
+
+    pub(crate) fn get_connection_id(&self) -> Option<&ConnectionId> {
+        let ext = self.find_extension(ExtensionType::ConnectionId)?;
+        match ext {
+            ClientExtension::ConnectionId(cid) => Some(cid),
+            _ => None,
         }
     }
 
@@ -1488,6 +1509,14 @@ impl ServerHelloPayload {
         let ext = self.find_extension(ExtensionType::PreSharedKey)?;
         match ext {
             ServerExtension::PresharedKey(index) => Some(*index),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn get_connection_id(&self) -> Option<&ConnectionId> {
+        let ext = self.find_extension(ExtensionType::ConnectionId)?;
+        match ext {
+            ServerExtension::ConnectionId(cid) => Some(cid),
             _ => None,
         }
     }
@@ -2783,7 +2812,9 @@ impl<'a> HandshakeMessagePayload<'a> {
                     HandshakePayload::ServerHello(shp)
                 }
             }
-            HandshakeType::Certificate if vers == ProtocolVersion::TLSv1_3 => {
+            HandshakeType::Certificate
+                if vers == ProtocolVersion::TLSv1_3 || vers == ProtocolVersion::DTLSv1_3 =>
+            {
                 let p = CertificatePayloadTls13::read(&mut sub)?;
                 HandshakePayload::CertificateTls13(p)
             }

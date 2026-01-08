@@ -1,9 +1,18 @@
-use crate::Error;
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::msgs::message::{OutboundChunks, OutboundPlainMessage, PlainMessage};
+use crate::Error;
 pub(crate) const MAX_FRAGMENT_LEN: usize = 16384;
 pub(crate) const PACKET_OVERHEAD: usize = 1 + 2 + 2;
+pub(crate) const DTLS_PACKET_OVERHEAD: usize = 1 + 2 + 2;
 pub(crate) const MAX_FRAGMENT_SIZE: usize = MAX_FRAGMENT_LEN + PACKET_OVERHEAD;
+pub(crate) const DTLS_MAX_FRAGMENT_SIZE: usize = MAX_FRAGMENT_LEN + DTLS_PACKET_OVERHEAD;
+use alloc::vec;
+use std::{collections::HashMap, vec::Vec};
+
+use crate::{
+    msgs::codec::{Codec, Reader},
+    HandshakeType, InvalidMessage,
+};
 
 pub struct MessageFragmenter {
     max_frag: usize,
@@ -70,6 +79,219 @@ impl MessageFragmenter {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct DtlsFragment {
+    pub typ: HandshakeType,
+    pub length: u32,
+    pub message_seq: u16,
+    pub fragment_offset: u32,
+    pub fragment_length: u32,
+    pub fragment: Vec<u8>,
+}
+
+impl Codec<'_> for DtlsFragment {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        self.typ.encode(bytes);
+
+        let len_bytes = self.length.to_be_bytes();
+        bytes.extend_from_slice(&len_bytes[1..4]);
+
+        self.message_seq.encode(bytes);
+
+        let offset_bytes = self.fragment_offset.to_be_bytes();
+        bytes.extend_from_slice(&offset_bytes[1..4]);
+
+        let frag_len_bytes = self.fragment_length.to_be_bytes();
+        bytes.extend_from_slice(&frag_len_bytes[1..4]);
+
+        bytes.extend_from_slice(&self.fragment);
+    }
+
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
+        let typ = HandshakeType::read(r)?;
+
+        let length = match r.take(3) {
+            Some(&[a, b, c]) => u32::from_be_bytes([0, a, b, c]),
+            _ => return Err(InvalidMessage::MissingData("handshake length")),
+        };
+
+        let message_seq = u16::read(r)?;
+
+        let fragment_offset = match r.take(3) {
+            Some(&[a, b, c]) => u32::from_be_bytes([0, a, b, c]),
+            _ => return Err(InvalidMessage::MissingData("fragment offset")),
+        };
+
+        let fragment_length = match r.take(3) {
+            Some(&[a, b, c]) => u32::from_be_bytes([0, a, b, c]),
+            _ => return Err(InvalidMessage::MissingData("fragment length")),
+        };
+
+        let fragment = r
+            .take(fragment_length as usize)
+            .ok_or(InvalidMessage::MissingData("fragment data"))?
+            .to_vec();
+
+        Ok(Self {
+            typ,
+            length,
+            message_seq,
+            fragment_offset,
+            fragment_length,
+            fragment,
+        })
+    }
+}
+
+pub(crate) struct DtlsFragmenter {
+    max_fragment_size: usize,
+}
+
+impl Default for DtlsFragmenter {
+    fn default() -> Self {
+        Self {
+            max_fragment_size: MAX_FRAGMENT_LEN,
+        }
+    }
+}
+
+impl DtlsFragmenter {
+    pub(crate) fn fragment_handshake_message(
+        &self,
+        typ: HandshakeType,
+        message_seq: u16,
+        payload: &[u8],
+    ) -> Vec<DtlsFragment> {
+        let total_length = payload.len();
+
+        if total_length <= self.max_fragment_size {
+            return vec![DtlsFragment {
+                typ,
+                length: total_length as u32,
+                message_seq,
+                fragment_offset: 0,
+                fragment_length: total_length as u32,
+                fragment: payload.to_vec(),
+            }];
+        }
+
+        let mut fragments = Vec::new();
+        let mut offset = 0;
+
+        while offset < total_length {
+            let remaining = total_length - offset;
+            let fragment_len = remaining.min(self.max_fragment_size);
+
+            fragments.push(DtlsFragment {
+                typ,
+                length: total_length as u32,
+                message_seq,
+                fragment_offset: offset as u32,
+                fragment_length: fragment_len as u32,
+                fragment: payload[offset..offset + fragment_len].to_vec(),
+            });
+
+            offset += fragment_len;
+        }
+
+        fragments
+    }
+
+    pub(crate) fn fragment_payload<'a>(
+        &self,
+        typ: ContentType,
+        version: ProtocolVersion,
+        payload: OutboundChunks<'a>,
+    ) -> impl ExactSizeIterator<Item = OutboundPlainMessage<'a>> {
+        Chunker::new(payload, self.max_fragment_size).map(move |payload| OutboundPlainMessage {
+            typ,
+            version,
+            payload,
+        })
+    }
+
+    pub fn set_max_fragment_size(&mut self, max_fragment_size: Option<usize>) -> Result<(), Error> {
+        self.max_fragment_size = match max_fragment_size {
+            Some(sz @ 32..=DTLS_MAX_FRAGMENT_SIZE) => sz - DTLS_PACKET_OVERHEAD,
+            None => MAX_FRAGMENT_LEN,
+            _ => return Err(Error::BadMaxFragmentSize),
+        };
+        Ok(())
+    }
+}
+
+pub(crate) struct DtlsReassembler {
+    fragments: HashMap<u16, Vec<DtlsFragment>>,
+}
+
+impl DtlsReassembler {
+    pub(crate) fn new() -> Self {
+        Self {
+            fragments: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn add_fragment(
+        &mut self,
+        fragment: DtlsFragment,
+    ) -> Result<Option<Vec<u8>>, InvalidMessage> {
+        let seq = fragment.message_seq;
+        let total_length = fragment.length as usize;
+
+        if fragment.fragment_offset as usize + fragment.fragment_length as usize > total_length {
+            return Err(InvalidMessage::MessageTooLarge);
+        }
+
+        self.fragments
+            .entry(seq)
+            .or_default()
+            .push(fragment);
+
+        if let Some(fragments) = self.fragments.get(&seq) {
+            if let Some(complete) = Self::try_reassemble(fragments, total_length)? {
+                self.fragments.remove(&seq);
+                return Ok(Some(complete));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn try_reassemble(
+        fragments: &[DtlsFragment],
+        total_length: usize,
+    ) -> Result<Option<Vec<u8>>, InvalidMessage> {
+        let mut complete = vec![false; total_length];
+
+        for frag in fragments {
+            let start = frag.fragment_offset as usize;
+            let end = start + frag.fragment_length as usize;
+
+            if end > total_length {
+                return Err(InvalidMessage::MessageTooLarge);
+            }
+
+            for i in start..end {
+                complete[i] = true;
+            }
+        }
+
+        if !complete.iter().all(|&x| x) {
+            return Ok(None);
+        }
+
+        let mut message = vec![0u8; total_length];
+
+        for frag in fragments {
+            let start = frag.fragment_offset as usize;
+            let end = start + frag.fragment.len();
+            message[start..end].copy_from_slice(&frag.fragment);
+        }
+
+        Ok(Some(message))
+    }
+}
+
 /// An iterator over borrowed fragments of a payload
 struct Chunker<'a> {
     payload: OutboundChunks<'a>,
@@ -110,7 +332,9 @@ mod tests {
     use super::{MessageFragmenter, PACKET_OVERHEAD};
     use crate::enums::{ContentType, ProtocolVersion};
     use crate::msgs::base::Payload;
+    use crate::msgs::fragmenter::{DtlsFragment, DtlsFragmenter, DtlsReassembler};
     use crate::msgs::message::{OutboundChunks, OutboundPlainMessage, PlainMessage};
+    use crate::HandshakeType;
 
     fn msg_eq(
         m: &OutboundPlainMessage<'_>,
@@ -228,5 +452,130 @@ mod tests {
             b"ccccccccccccccccccccdddddddddddd",
         );
         msg_eq(&fragments[2], 13, &typ, &version, b"dddddddd");
+    }
+
+    #[test]
+    fn test_no_fragmentation_needed() {
+        let fragmenter = DtlsFragmenter::default();
+        let payload = vec![0x42; 100];
+
+        let fragments =
+            fragmenter.fragment_handshake_message(HandshakeType::ClientHello, 0, &payload);
+
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].fragment_offset, 0);
+        assert_eq!(fragments[0].fragment_length, 100);
+    }
+
+    #[test]
+    fn test_fragmentation() {
+        let fragmenter = DtlsFragmenter::default();
+        let payload = vec![0x42; 150];
+
+        let fragments =
+            fragmenter.fragment_handshake_message(HandshakeType::Certificate, 5, &payload);
+
+        assert_eq!(fragments.len(), 3);
+        assert_eq!(fragments[0].fragment_offset, 0);
+        assert_eq!(fragments[0].fragment_length, 50);
+        assert_eq!(fragments[1].fragment_offset, 50);
+        assert_eq!(fragments[1].fragment_length, 50);
+        assert_eq!(fragments[2].fragment_offset, 100);
+        assert_eq!(fragments[2].fragment_length, 50);
+
+        for frag in &fragments {
+            assert_eq!(frag.length, 150);
+            assert_eq!(frag.message_seq, 5);
+        }
+    }
+
+    #[test]
+    fn test_reassembly_in_order() {
+        let mut reassembler = DtlsReassembler::new();
+
+        let fragments = [
+            DtlsFragment {
+                typ: HandshakeType::Certificate,
+                length: 150,
+                message_seq: 0,
+                fragment_offset: 0,
+                fragment_length: 50,
+                fragment: vec![0x41; 50],
+            },
+            DtlsFragment {
+                typ: HandshakeType::Certificate,
+                length: 150,
+                message_seq: 0,
+                fragment_offset: 50,
+                fragment_length: 50,
+                fragment: vec![0x42; 50],
+            },
+            DtlsFragment {
+                typ: HandshakeType::Certificate,
+                length: 150,
+                message_seq: 0,
+                fragment_offset: 100,
+                fragment_length: 50,
+                fragment: vec![0x43; 50],
+            },
+        ];
+
+        assert!(reassembler
+            .add_fragment(fragments[0].clone())
+            .unwrap()
+            .is_none());
+        assert!(reassembler
+            .add_fragment(fragments[1].clone())
+            .unwrap()
+            .is_none());
+
+        let complete = reassembler
+            .add_fragment(fragments[2].clone())
+            .unwrap();
+        assert!(complete.is_some());
+
+        let message = complete.unwrap();
+        assert_eq!(message.len(), 150);
+        assert_eq!(&message[0..50], &vec![0x41; 50][..]);
+        assert_eq!(&message[50..100], &vec![0x42; 50][..]);
+        assert_eq!(&message[100..150], &vec![0x43; 50][..]);
+    }
+
+    #[test]
+    fn test_reassembly_out_of_order() {
+        let mut reassembler = DtlsReassembler::new();
+
+        let fragments = [
+            DtlsFragment {
+                typ: HandshakeType::Certificate,
+                length: 100,
+                message_seq: 0,
+                fragment_offset: 50,
+                fragment_length: 50,
+                fragment: vec![0x42; 50],
+            },
+            DtlsFragment {
+                typ: HandshakeType::Certificate,
+                length: 100,
+                message_seq: 0,
+                fragment_offset: 0,
+                fragment_length: 50,
+                fragment: vec![0x41; 50],
+            },
+        ];
+
+        assert!(reassembler
+            .add_fragment(fragments[0].clone())
+            .unwrap()
+            .is_none());
+
+        let complete = reassembler
+            .add_fragment(fragments[1].clone())
+            .unwrap();
+        assert!(complete.is_some());
+
+        let message = complete.unwrap();
+        assert_eq!(&message[0..50], &vec![0x41; 50][..]);
+        assert_eq!(&message[50..100], &vec![0x42; 50][..]);
     }
 }

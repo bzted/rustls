@@ -426,6 +426,10 @@ pub(super) fn fill_in_authkem_psk_ss(
 }
 
 pub(super) fn emit_fake_ccs(sent_tls13_fake_ccs: &mut bool, common: &mut CommonState) {
+    if common.protocol == Protocol::Udp {
+        return;
+    }
+
     if common.is_quic() {
         return;
     }
@@ -1259,7 +1263,8 @@ impl State<ClientConnectionData> for ExpectCertificate {
                         );
                         let mut finished_flight = HandshakeFlightTls13::new(&mut self.transcript);
 
-                        let key_schedule = auth_handshake_key_schedule.into_main_secret(None);
+                        let key_schedule =
+                            auth_handshake_key_schedule.into_main_secret(None, cx.common);
                         let verify_data = key_schedule.sign_client_finish(
                             &finished_flight
                                 .transcript
@@ -1328,7 +1333,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
                 debug!("Client sending finished message");
                 let mut finished_flight = HandshakeFlightTls13::new(&mut self.transcript);
 
-                let key_schedule = auth_handshake_key_schedule.into_main_secret(None);
+                let key_schedule = auth_handshake_key_schedule.into_main_secret(None, cx.common);
                 let verify_data = key_schedule.sign_client_finish(
                     &finished_flight
                         .transcript
@@ -1431,7 +1436,7 @@ impl State<ClientConnectionData> for ExpectServerKemEncapsulation {
         let hs_hash = flight.transcript.current_hash();
         let key_schedule_pre_finished = self
             .auth_key_schedule
-            .into_main_secret(Some(&client_ss));
+            .into_main_secret(Some(&client_ss), cx.common);
         let verify_data = key_schedule_pre_finished.sign_client_finish(&hs_hash);
         emit_finished_tls13(&mut flight, &verify_data);
 

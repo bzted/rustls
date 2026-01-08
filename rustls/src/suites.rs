@@ -8,6 +8,8 @@ use crate::msgs::handshake::ALL_KEY_EXCHANGE_ALGORITHMS;
 #[cfg(feature = "tls12")]
 use crate::tls12::Tls12CipherSuite;
 use crate::tls13::Tls13CipherSuite;
+#[cfg(feature = "dtls13")]
+use crate::versions::DTLS13;
 #[cfg(feature = "tls12")]
 use crate::versions::TLS12;
 use crate::versions::{SupportedProtocolVersion, TLS13};
@@ -104,6 +106,9 @@ impl SupportedCipherSuite {
         match self {
             #[cfg(feature = "tls12")]
             Self::Tls12(_) => &TLS12,
+            #[cfg(feature = "dtls13")]
+            Self::Tls13(_) => &DTLS13, // DTLS 1.3 cipher suites are the same as TLS 1.3
+            #[cfg(not(feature = "dtls13"))]
             Self::Tls13(_) => &TLS13,
         }
     }
@@ -132,6 +137,7 @@ impl SupportedCipherSuite {
                 .tls13()
                 .and_then(|cs| cs.quic)
                 .is_some(),
+            Protocol::Udp => true,
         }
     }
 
@@ -254,19 +260,15 @@ mod tests {
 
     #[test]
     fn test_can_resume_to() {
-        assert!(
-            TLS13_AES_128_GCM_SHA256
-                .tls13()
-                .unwrap()
-                .can_resume_from(TLS13_CHACHA20_POLY1305_SHA256_INTERNAL)
-                .is_some()
-        );
-        assert!(
-            TLS13_AES_256_GCM_SHA384
-                .tls13()
-                .unwrap()
-                .can_resume_from(TLS13_CHACHA20_POLY1305_SHA256_INTERNAL)
-                .is_none()
-        );
+        assert!(TLS13_AES_128_GCM_SHA256
+            .tls13()
+            .unwrap()
+            .can_resume_from(TLS13_CHACHA20_POLY1305_SHA256_INTERNAL)
+            .is_some());
+        assert!(TLS13_AES_256_GCM_SHA384
+            .tls13()
+            .unwrap()
+            .can_resume_from(TLS13_CHACHA20_POLY1305_SHA256_INTERNAL)
+            .is_none());
     }
 }

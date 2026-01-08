@@ -4,14 +4,17 @@ use std::net::{TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
 
+use kemtls_provider::resolver::{ClientCertResolver, KeyPair};
+use kemtls_provider::sign::DummySigningKey;
 use kemtls_provider::verify::ClientVerifier;
-use kemtls_provider::{get_kx_group_by_name, provider};
+use kemtls_provider::{get_kx_group_by_name, provider, MlKemKey};
 use log::debug;
+use oqs::kem::Kem;
 use rustls::crypto::CryptoProvider;
-use rustls::{ClientConfig, ClientConnection};
+use rustls::{ClientConfig, ClientConnection, StreamOwned};
 
 const BUFFER_SIZE: usize = 4096;
-const TIMEOUT_SECS: u64 = 5;
+const TIMEOUT_SECS: u64 = 60;
 const SERVER_ADDR: &str = "127.0.0.1:8443";
 
 fn get_kem_algorithm(algorithm: &str) -> Result<oqs::kem::Algorithm, String> {
@@ -213,7 +216,15 @@ fn run_tls_client(
     Ok(())
 }
 
-fn parse_arguments() -> (Option<String>, String) {
+fn main() {
+    env_logger::init();
+
+    let mut use_dtls = false;
+    if cfg!(feature = "dtls13") {
+        debug!("Using DTLS 1.3");
+        use_dtls = true;
+    }
+
     let mut args = std::env::args();
     args.next();
 
@@ -232,7 +243,7 @@ fn parse_arguments() -> (Option<String>, String) {
             "-authkem" => {
                 authkem = args.next();
                 if authkem.is_none() {
-                    eprintln!("Error: -authkem requires an algorithm name");
+                    eprintln!("Error: -auth requires an algorithm name");
                     std::process::exit(1);
                 }
             }
@@ -243,19 +254,19 @@ fn parse_arguments() -> (Option<String>, String) {
         }
     }
 
+    // If authkem algorithm not provided, we use MLKEM768 as default
     let authkem = authkem.unwrap_or_else(|| "MLKEM768".to_string());
-    (group, authkem)
-}
 
-fn main() {
-    env_logger::init();
+    let mut crypto_provider = provider();
 
-    let use_dtls = cfg!(feature = "dtls13");
-    if use_dtls {
-        debug!("Using DTLS 1.3");
+    if let Some(ref group_name) = group {
+        println!("Selecting KX group: {}", group_name);
+        select_kx_group(&mut crypto_provider, group_name);
+    } else {
+        debug!("Using all available KX groups");
     }
 
-    let (group, authkem) = parse_arguments();
+    debug!("Trying client authentication");
 
     let kemalg = match get_kem_algorithm(&authkem) {
         Ok(alg) => {
@@ -270,21 +281,28 @@ fn main() {
 
     let server_verifier = Arc::new(ClientVerifier::new(kemalg));
 
-    let mut crypto_provider = provider();
+    let kem = Kem::new(kemalg).expect("Failed to create kem instance");
 
-    if let Some(ref group_name) = group {
-        println!("Selecting KX group: {}", group_name);
-        select_kx_group(&mut crypto_provider, group_name);
-    } else {
-        debug!("Using all available KX groups");
-    }
+    let (public_key, secret_key) = kem
+        .keypair()
+        .expect("Failed to generate KEM keypair");
+
+    let signing_key = Arc::new(DummySigningKey);
+
+    let kem_key = Arc::new(MlKemKey::new(kemalg, secret_key.as_ref().to_vec()));
+
+    // Create our key pair structure
+    let key_pair = KeyPair::new(public_key, signing_key, Some(kem_key));
+
+    // Create our custom resolver
+    let resolver = Arc::new(ClientCertResolver::new(key_pair));
 
     let client_config = ClientConfig::builder_with_provider(crypto_provider.into())
         .with_safe_default_protocol_versions()
         .unwrap()
         .dangerous()
         .with_custom_certificate_verifier(server_verifier)
-        .with_no_client_auth();
+        .with_client_cert_resolver(resolver);
 
     let server_name = "servername".try_into().unwrap();
 

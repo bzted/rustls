@@ -2,21 +2,29 @@ use alloc::boxed::Box;
 use core::fmt::Debug;
 use core::mem;
 use core::ops::{Deref, DerefMut, Range};
+use log::debug;
 #[cfg(feature = "std")]
 use std::io;
+use std::vec::Vec;
 
-use crate::common_state::{CommonState, Context, DEFAULT_BUFFER_LIMIT, IoState, State};
+use crate::common_state::{CommonState, Context, IoState, State, DEFAULT_BUFFER_LIMIT};
 use crate::enums::{AlertDescription, ContentType, ProtocolVersion};
 use crate::error::{Error, PeerMisbehaved};
 use crate::log::trace;
-use crate::msgs::deframer::DeframerIter;
+use crate::msgs::codec::{u24, Codec};
 use crate::msgs::deframer::buffers::{BufferProgress, DeframerVecBuffer, Delocator, Locator};
 use crate::msgs::deframer::handshake::HandshakeDeframer;
+use crate::msgs::deframer::DeframerIter;
+use crate::msgs::fragmenter::{DtlsFragment, DtlsReassembler};
 use crate::msgs::handshake::Random;
-use crate::msgs::message::{InboundPlainMessage, Message, MessagePayload};
+use crate::msgs::message::{
+    InboundPlainMessage, InboundPlainMessageOwned, Message, MessagePayload, ProcessedMessage,
+};
+use crate::record_common::IncomingRecord;
 use crate::record_layer::Decrypted;
 use crate::suites::{ExtractedSecrets, PartiallyExtractedSecrets};
 use crate::vecbuf::ChunkVecBuffer;
+use crate::HandshakeType;
 
 pub(crate) mod unbuffered;
 
@@ -27,12 +35,12 @@ mod connection {
     use core::ops::{Deref, DerefMut};
     use std::io::{self, BufRead, Read};
 
-    use crate::ConnectionCommon;
     use crate::common_state::{CommonState, IoState};
     use crate::error::Error;
     use crate::msgs::message::OutboundChunks;
     use crate::suites::ExtractedSecrets;
     use crate::vecbuf::ChunkVecBuffer;
+    use crate::ConnectionCommon;
 
     /// A client or server connection.
     #[derive(Debug)]
@@ -295,7 +303,8 @@ mod connection {
         }
     }
 
-    const UNEXPECTED_EOF_MESSAGE: &str = "peer closed connection without sending TLS close_notify: \
+    const UNEXPECTED_EOF_MESSAGE: &str =
+        "peer closed connection without sending TLS close_notify: \
 https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof";
 
     /// A structure that implements [`std::io::Write`] for writing plaintext.
@@ -681,7 +690,12 @@ impl<Data> ConnectionCommon<Data> {
     /// `process_handshake_messages()` path, specialized for the first handshake message.
     pub(crate) fn first_handshake_message(&mut self) -> Result<Option<Message<'static>>, Error> {
         let mut buffer_progress = self.core.hs_deframer.progress();
-
+        if cfg!(feature = "dtls13") {
+            self.protocol = crate::common_state::Protocol::Udp;
+            self.core.common_state.record_layer = crate::record_common::AnyRecordLayer::Dtls(
+                Box::new(crate::dtls13::record_layer::DtlsRecordLayer::new()),
+            );
+        }
         let res = self
             .core
             .deframe(
@@ -689,7 +703,9 @@ impl<Data> ConnectionCommon<Data> {
                 self.deframer_buffer.filled_mut(),
                 &mut buffer_progress,
             )
-            .map(|opt| opt.map(|pm| Message::try_from(pm).map(|m| m.into_owned())));
+            .map(|opt| {
+                opt.map(|pm| Message::try_from(pm.as_plain_message()).map(|m| m.into_owned()))
+            });
 
         match res? {
             Some(Ok(msg)) => {
@@ -833,6 +849,7 @@ pub(crate) struct ConnectionCore<Data> {
     pub(crate) data: Data,
     pub(crate) common_state: CommonState,
     pub(crate) hs_deframer: HandshakeDeframer,
+    pub(crate) dtls_reassembler: DtlsReassembler,
 
     /// We limit consecutive empty fragments to avoid a route for the peer to send
     /// us significant but fruitless traffic.
@@ -846,6 +863,7 @@ impl<Data> ConnectionCore<Data> {
             data,
             common_state,
             hs_deframer: HandshakeDeframer::default(),
+            dtls_reassembler: DtlsReassembler::new(),
             seen_consecutive_empty_fragments: 0,
         }
     }
@@ -866,6 +884,25 @@ impl<Data> ConnectionCore<Data> {
         let mut buffer_progress = self.hs_deframer.progress();
 
         loop {
+            if let Some(retransmit) = self
+                .common_state
+                .record_layer
+                .poll_retransmit()
+                .map(|r| r.to_vec())
+            {
+                debug!("Timer timed out, retransmiting last flight");
+
+                for buf in retransmit {
+                    self.common_state
+                        .sendable_tls
+                        .append(buf);
+                }
+
+                self.common_state
+                    .record_layer
+                    .mark_sent();
+            }
+
             let res = self.deframe(
                 Some(&*state),
                 deframer_buffer.filled_mut(),
@@ -885,7 +922,7 @@ impl<Data> ConnectionCore<Data> {
                 break;
             };
 
-            match self.process_msg(msg, state, Some(sendable_plaintext)) {
+            match self.process_msg(msg.as_plain_message(), state, Some(sendable_plaintext)) {
                 Ok(new) => state = new,
                 Err(e) => {
                     self.state = Err(e.clone());
@@ -919,7 +956,7 @@ impl<Data> ConnectionCore<Data> {
         state: Option<&dyn State<Data>>,
         buffer: &'b mut [u8],
         buffer_progress: &mut BufferProgress,
-    ) -> Result<Option<InboundPlainMessage<'b>>, Error> {
+    ) -> Result<Option<ProcessedMessage<'b>>, Error> {
         // before processing any more of `buffer`, return any extant messages from `hs_deframer`
         if self.hs_deframer.has_message_ready() {
             Ok(self.take_handshake_message(buffer, buffer_progress))
@@ -932,13 +969,13 @@ impl<Data> ConnectionCore<Data> {
         &mut self,
         buffer: &'b mut [u8],
         buffer_progress: &mut BufferProgress,
-    ) -> Option<InboundPlainMessage<'b>> {
+    ) -> Option<ProcessedMessage<'b>> {
         self.hs_deframer
             .iter(buffer)
             .next()
             .map(|(message, discard)| {
                 buffer_progress.add_discard(discard);
-                message
+                ProcessedMessage::Borrowed(message)
             })
     }
 
@@ -947,16 +984,26 @@ impl<Data> ConnectionCore<Data> {
         state: Option<&dyn State<Data>>,
         buffer: &'b mut [u8],
         buffer_progress: &mut BufferProgress,
-    ) -> Result<Option<InboundPlainMessage<'b>>, Error> {
+    ) -> Result<Option<ProcessedMessage<'b>>, Error> {
         let version_is_tls13 = matches!(
             self.common_state.negotiated_version,
             Some(ProtocolVersion::TLSv1_3)
         );
 
+        let version_is_dtls13 = self.common_state.is_dtls();
+        let mut cid_len = 0;
+
+        if version_is_dtls13 {
+            cid_len = self
+                .common_state
+                .record_layer
+                .read_cid_len();
+        }
         let locator = Locator::new(buffer);
 
         loop {
-            let mut iter = DeframerIter::new(&mut buffer[buffer_progress.processed()..]);
+            trace!("Buffer length: {:?}", buffer.len(),);
+            let mut iter = DeframerIter::new(&mut buffer[buffer_progress.processed()..], cid_len);
 
             let (message, processed) = loop {
                 let message = match iter.next().transpose() {
@@ -965,7 +1012,7 @@ impl<Data> ConnectionCore<Data> {
                     Err(err) => return Err(self.handle_deframe_error(err, state)),
                 };
 
-                let allowed_plaintext = match message.typ {
+                let allowed_plaintext = match message.opaque.typ {
                     // CCS messages are always plaintext.
                     ContentType::ChangeCipherSpec => true,
                     // Alerts are allowed to be plaintext if-and-only-if:
@@ -980,7 +1027,7 @@ impl<Data> ConnectionCore<Data> {
                                 .common_state
                                 .record_layer
                                 .has_decrypted()
-                            && message.payload.len() <= 2 =>
+                            && message.opaque.payload.len() <= 2 =>
                     {
                         true
                     }
@@ -989,7 +1036,7 @@ impl<Data> ConnectionCore<Data> {
                 };
 
                 if allowed_plaintext && !self.hs_deframer.is_active() {
-                    break (message.into_plain_message(), iter.bytes_consumed());
+                    break (message.opaque.into_plain_message(), iter.bytes_consumed());
                 }
 
                 let message = match self
@@ -1021,7 +1068,6 @@ impl<Data> ConnectionCore<Data> {
                 if want_close_before_decrypt {
                     self.common_state.send_close_notify();
                 }
-
                 break (plaintext, iter.bytes_consumed());
             };
 
@@ -1061,10 +1107,35 @@ impl<Data> ConnectionCore<Data> {
             if unborrowed.typ != ContentType::Handshake {
                 let message = unborrowed.reborrow(&Delocator::new(buffer));
                 buffer_progress.add_discard(processed);
-                return Ok(Some(message));
+                return Ok(Some(ProcessedMessage::Borrowed(message)));
             }
 
             let message = unborrowed.reborrow(&Delocator::new(buffer));
+            if version_is_dtls13 {
+                match self.process_dtls_fragment(message.payload)? {
+                    Some((typ, complete_payload)) => {
+                        let mut complete_msg = Vec::with_capacity(complete_payload.len() + 4);
+                        typ.encode(&mut complete_msg);
+                        u24(complete_payload.len() as u32).encode(&mut complete_msg);
+
+                        let mut payload = complete_payload;
+                        complete_msg.append(&mut payload);
+
+                        let full_message = InboundPlainMessageOwned {
+                            typ: ContentType::Handshake,
+                            version: message.version,
+                            payload: complete_msg,
+                        };
+
+                        buffer_progress.add_discard(processed);
+                        return Ok(Some(ProcessedMessage::Owned(full_message)));
+                    }
+                    None => {
+                        buffer_progress.add_discard(processed);
+                        continue;
+                    }
+                }
+            }
             self.hs_deframer
                 .input_message(message, &locator, buffer_progress.processed());
             self.hs_deframer.coalesce(buffer)?;
@@ -1155,6 +1226,34 @@ impl<Data> ConnectionCore<Data> {
 
         self.common_state
             .process_main_protocol(msg, state, &mut self.data, sendable_plaintext)
+    }
+
+    pub(crate) fn process_dtls_fragment(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<Option<(HandshakeType, Vec<u8>)>, Error> {
+        use crate::msgs::codec::{Codec, Reader};
+        let mut reader = Reader::init(payload);
+        let fragment = DtlsFragment::read(&mut reader)?;
+
+        debug!(
+            "DTLS fragment: seq={}, offset={}, len={}, total={}",
+            fragment.message_seq,
+            fragment.fragment_offset,
+            fragment.fragment_length,
+            fragment.length
+        );
+
+        let typ = fragment.typ;
+
+        if let Some(msg) = self
+            .dtls_reassembler
+            .add_fragment(fragment)?
+        {
+            return Ok(Some((typ, msg)));
+        }
+
+        Ok(None)
     }
 
     pub(crate) fn dangerous_extract_secrets(self) -> Result<ExtractedSecrets, Error> {

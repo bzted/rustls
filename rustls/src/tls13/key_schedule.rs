@@ -2,7 +2,7 @@
 
 use alloc::boxed::Box;
 use alloc::string::ToString;
-use log::debug;
+use log::{debug, trace};
 
 use crate::common_state::{CommonState, Side};
 use crate::crypto::cipher::{AeadKey, Iv, MessageDecrypter, Tls13AeadAlgorithm};
@@ -119,12 +119,27 @@ impl KeyScheduleEarly {
         );
 
         match common.side {
-            Side::Client => self
-                .ks
-                .set_encrypter(&client_early_traffic_secret, common),
-            Side::Server => self
-                .ks
-                .set_decrypter(&client_early_traffic_secret, common),
+            Side::Client => {
+                #[cfg(feature = "dtls13")]
+                {
+                    common
+                        .record_layer
+                        .advance_write_epoch();
+                    assert_eq!(common.record_layer.write_epoch(), 1);
+                }
+                self.ks
+                    .set_encrypter(&client_early_traffic_secret, common)
+            }
+            Side::Server => {
+                #[cfg(feature = "dtls13")]
+                {
+                    common.record_layer.advance_read_epoch();
+                    assert_eq!(common.record_layer.read_epoch(), 1);
+                }
+
+                self.ks
+                    .set_decrypter(&client_early_traffic_secret, common)
+            }
         }
 
         if common.is_quic() {
@@ -134,6 +149,7 @@ impl KeyScheduleEarly {
         }
     }
 
+    // Authkem psk
     pub(crate) fn client_early_handshake_traffic_secret(
         &self,
         hs_hash: &hash::Output,
@@ -149,12 +165,26 @@ impl KeyScheduleEarly {
         );
 
         match common.side {
-            Side::Client => self
-                .ks
-                .set_encrypter(&client_early_handshake_traffic_secret, common),
-            Side::Server => self
-                .ks
-                .set_decrypter(&client_early_handshake_traffic_secret, common),
+            Side::Client => {
+                #[cfg(feature = "dtls13")]
+                {
+                    common
+                        .record_layer
+                        .advance_write_epoch();
+                    assert_eq!(common.record_layer.write_epoch(), 1);
+                }
+                self.ks
+                    .set_encrypter(&client_early_handshake_traffic_secret, common)
+            }
+            Side::Server => {
+                #[cfg(feature = "dtls13")]
+                {
+                    common.record_layer.advance_read_epoch();
+                    assert_eq!(common.record_layer.read_epoch(), 1);
+                }
+                self.ks
+                    .set_decrypter(&client_early_handshake_traffic_secret, common)
+            }
         }
     }
 
@@ -219,6 +249,25 @@ impl KeyScheduleHandshakeStart {
         debug_assert_eq!(common.side, Side::Client);
         // Suite might have changed due to resumption
         self.ks.suite = suite;
+        #[cfg(feature = "dtls13")]
+        {
+            // As server doesn't send early data,
+            // client starts with read_epoch = 2;
+            common.record_layer.advance_read_epoch();
+            common.record_layer.advance_read_epoch();
+            assert_eq!(common.record_layer.read_epoch(), 2);
+            common
+                .record_layer
+                .advance_write_epoch();
+            if !early_data_enabled {
+                // If early data has been sent
+                // epoch must already be 1
+                common
+                    .record_layer
+                    .advance_write_epoch();
+            }
+            assert_eq!(common.record_layer.write_epoch(), 2);
+        }
         let new = self.into_handshake(hs_hash, key_log, client_random, common);
 
         // Decrypt with the peer's key, encrypt with our own key
@@ -242,6 +291,19 @@ impl KeyScheduleHandshakeStart {
         common: &mut CommonState,
     ) -> KeyScheduleHandshake {
         debug_assert_eq!(common.side, Side::Server);
+        #[cfg(feature = "dtls13")]
+        {
+            // Server doesn`'t send early data
+            // Starts with write_epoch = 2
+            common
+                .record_layer
+                .advance_write_epoch();
+            common
+                .record_layer
+                .advance_write_epoch();
+            assert_eq!(common.record_layer.write_epoch(), 2);
+            common.record_layer.advance_read_epoch();
+        }
         let new = self.into_handshake(hs_hash, key_log, client_random, common);
 
         // Set up to encrypt with handshake secrets, but decrypt with early_data keys.
@@ -284,12 +346,11 @@ impl KeyScheduleHandshakeStart {
         common: &mut CommonState,
     ) -> KeyScheduleHandshake {
         // Use an empty handshake hash for the initial handshake.
-        debug!(
+        trace!(
             "SIDE:{:?} TRANSCRIPT HASH: {:02x?}",
             common.side,
             &hs_hash.as_ref()[..std::cmp::min(16, hs_hash.as_ref().len())]
         );
-        debug!("DEBUG: Suite used: {:?}", self.ks.suite.common.suite);
         let client_secret = self.ks.derive_logged_secret(
             SecretKind::ClientHandshakeTrafficSecret,
             hs_hash.as_ref(),
@@ -347,6 +408,11 @@ impl KeyScheduleHandshake {
         common: &mut CommonState,
     ) {
         debug_assert_eq!(common.side, Side::Server);
+        #[cfg(feature = "dtls13")]
+        {
+            common.record_layer.advance_read_epoch();
+            assert_eq!(common.record_layer.read_epoch(), 2);
+        }
         let secret = &self.client_handshake_traffic_secret;
         match skip_requested {
             None => self.ks.set_decrypter(secret, common),
@@ -375,6 +441,13 @@ impl KeyScheduleHandshake {
             &traffic.current_server_traffic_secret,
         );
 
+        #[cfg(feature = "dtls13")]
+        {
+            common
+                .record_layer
+                .advance_write_epoch();
+            assert_eq!(common.record_layer.write_epoch(), 3);
+        }
         traffic
             .ks
             .set_encrypter(server_secret, common);
@@ -441,12 +514,31 @@ impl KeyScheduleHandshake {
 
         match common.side {
             Side::Client => {
+                #[cfg(feature = "dtls13")]
+                {
+                    common
+                        .record_layer
+                        .advance_write_epoch();
+                    debug_assert_eq!(common.record_layer.write_epoch(), 3);
+                    common.record_layer.advance_read_epoch();
+                    debug_assert_eq!(common.record_layer.read_epoch(), 3);
+                }
+
                 self.ks
                     .set_encrypter(&client_secret, common);
                 self.ks
                     .set_decrypter(&server_secret, common);
             }
             Side::Server => {
+                #[cfg(feature = "dtls13")]
+                {
+                    common
+                        .record_layer
+                        .advance_write_epoch();
+                    debug_assert_eq!(common.record_layer.write_epoch(), 3);
+                    common.record_layer.advance_read_epoch();
+                    debug_assert_eq!(common.record_layer.read_epoch(), 3);
+                }
                 self.ks
                     .set_encrypter(&server_secret, common);
                 self.ks
@@ -590,6 +682,11 @@ impl KeyScheduleTrafficWithClientFinishedPending {
             .ks
             .sign_finish(&self.handshake_client_traffic_secret, hs_hash);
 
+        #[cfg(feature = "dtls13")]
+        {
+            common.record_layer.advance_read_epoch();
+            assert_eq!(common.record_layer.read_epoch(), 3);
+        }
         // Install keying to read future messages.
         self.traffic.ks.set_decrypter(
             &self
@@ -660,13 +757,20 @@ impl KeyScheduleTraffic {
         common: &mut CommonState,
     ) -> Result<(), Error> {
         common.check_aligned_handshake()?;
+        #[cfg(not(feature = "dtls13"))]
         common.send_msg_encrypt(Message::build_key_update_request().into());
+        #[cfg(feature = "dtls13")]
+        common
+            .record_layer
+            .advance_write_epoch();
         let secret = self.next_application_traffic_secret(common.side);
         self.ks.set_encrypter(&secret, common);
         Ok(())
     }
 
     pub(crate) fn update_decrypter(&mut self, common: &mut CommonState) {
+        #[cfg(feature = "dtls13")]
+        common.record_layer.advance_read_epoch();
         let secret = self.next_application_traffic_secret(common.side.peer());
         self.ks.set_decrypter(&secret, common);
     }
@@ -764,17 +868,30 @@ pub(crate) struct KeyScheduleAuthenticatedHandshake {
 }
 
 impl KeyScheduleAuthenticatedHandshake {
-    pub(crate) fn into_main_secret(mut self, client_ss: Option<&[u8]>) -> KeyScheduleMainSecret {
+    pub(crate) fn into_main_secret(
+        mut self,
+        client_ss: Option<&[u8]>,
+        common: &mut CommonState,
+    ) -> KeyScheduleMainSecret {
+        #[cfg(feature = "dtls13")]
+        {
+            common
+                .record_layer
+                .advance_write_epoch();
+            common.record_layer.advance_read_epoch();
+            debug_assert_eq!(common.record_layer.write_epoch(), 4);
+            debug_assert_eq!(common.record_layer.read_epoch(), 4);
+        }
         if let Some(client_ss) = client_ss {
-            debug!("Client auth requested");
-            debug!("Client shared secret length: {}", client_ss.len());
-            debug!(
+            trace!("Client auth requested");
+            trace!("Client shared secret length: {}", client_ss.len());
+            trace!(
                 "Client shared secret first bytes: {:02x?}",
                 &client_ss[..std::cmp::min(8, client_ss.len())]
             );
             self.ks.input_secret(client_ss);
         } else {
-            debug!("No client auth request, client_ss: None");
+            trace!("No client auth request, client_ss: None");
             self.ks.input_empty();
         }
 
@@ -848,6 +965,16 @@ impl KeyScheduleClientTraffic {
             key_log,
             client_random,
         );
+
+        #[cfg(feature = "dtls13")]
+        {
+            common
+                .record_layer
+                .advance_write_epoch();
+            common.record_layer.advance_read_epoch();
+            assert_eq!(common.record_layer.write_epoch(), 5);
+            assert_eq!(common.record_layer.read_epoch(), 5);
+        }
 
         match side {
             Side::Client => {
@@ -973,7 +1100,7 @@ impl KeySchedule {
         key_log: &dyn KeyLog,
         client_random: &[u8; 32],
     ) -> OkmBlock {
-        debug!(
+        trace!(
             "DERIVE SECRET:{:?} HASH: {:02x?} SUITE:{:?}",
             kind,
             &hs_hash[..core::cmp::min(8, hs_hash.len())],

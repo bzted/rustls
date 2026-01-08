@@ -4,7 +4,7 @@ use core::ops::Range;
 
 use super::buffers::{BufferProgress, Coalescer, Delocator, Locator};
 use crate::error::InvalidMessage;
-use crate::msgs::codec::{Codec, u24};
+use crate::msgs::codec::{u24, Codec};
 use crate::msgs::message::InboundPlainMessage;
 use crate::{ContentType, ProtocolVersion};
 
@@ -484,10 +484,13 @@ mod tests {
 
         let mut hs = HandshakeDeframer::default();
 
-        let mut iter = DeframerIter::new(&mut input[..]);
+        let mut iter = DeframerIter::new(&mut input[..], 0);
 
         while let Some(message) = iter.next() {
-            let plain = message.unwrap().into_plain_message();
+            let plain = message
+                .unwrap()
+                .opaque
+                .into_plain_message();
             std::println!("message {plain:?}");
 
             hs.input_message(plain, &locator, iter.bytes_consumed());

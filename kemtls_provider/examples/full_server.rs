@@ -1,24 +1,27 @@
 use kemtls_provider::resolver::{KeyPair, ServerCertResolver};
 use kemtls_provider::sign::DummySigningKey;
+use kemtls_provider::verify::ServerVerifier;
 use kemtls_provider::{get_kx_group_by_name, provider, MlKemKey};
 use log::debug;
 use oqs::kem::Kem;
 use rustls::crypto::CryptoProvider;
 use rustls::server::Acceptor;
 use rustls::{ServerConfig, ServerConnection};
-use std::io::Read;
 use std::io::Write;
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::Arc;
+use std::time::Duration;
 
 const BUFFER_SIZE: usize = 4096;
 const SERVER_PORT: u16 = 8443;
+const TIMEOUT_SECS: u64 = 60;
 const HTTP_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\n\
                                 Connection: closed\r\n\
                                 Content-Type: text/html\r\n\
                                 \r\n\
-                                <h1>Hello World!</h1>\r\n";
-const DTLS_HTTP_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nHello World!";
+                                <h1>Hello Authenticated World!</h1>\r\n";
+const DTLS_HTTP_RESPONSE: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nHello World, I'm using DTLS 1.3!";
 
 fn get_kem_algorithm(algorithm: &str) -> Result<oqs::kem::Algorithm, String> {
     match algorithm.to_uppercase().as_str() {
@@ -57,10 +60,11 @@ fn create_server_config(
     let key_pair = KeyPair::new(public_key, signing_key, Some(kem_key));
 
     let resolver = Arc::new(ServerCertResolver::new(key_pair));
+    let client_verifier = Arc::new(ServerVerifier::new(kemalg));
 
     let mut server_config = ServerConfig::builder_with_provider(crypto_provider.into())
         .with_safe_default_protocol_versions()?
-        .with_no_client_auth()
+        .with_client_cert_verifier(client_verifier)
         .with_cert_resolver(resolver);
 
     server_config.key_log = Arc::new(rustls::KeyLogFile::new());
@@ -117,9 +121,7 @@ fn handle_tls_client(
     // Close connection gracefully
     conn.send_close_notify();
     conn.write_tls(&mut stream)?;
-    conn.complete_io(&mut stream)?;
 
-    debug!("TLS connection handled successfully");
     Ok(())
 }
 
@@ -234,6 +236,9 @@ fn handle_dtls_connection(
 
 fn run_dtls_server(server_config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     let socket = UdpSocket::bind(format!("[::]:{}", SERVER_PORT))?;
+    socket.set_read_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
+    socket.set_write_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
+
     socket.set_nonblocking(false)?;
     println!("DTLS server listening on port {}", SERVER_PORT);
 
@@ -246,7 +251,6 @@ fn run_dtls_server(server_config: ServerConfig) -> Result<(), Box<dyn std::error
             handle_dtls_connection(&socket, acceptor, server_config.clone(), &mut buffer)
         {
             eprintln!("Error handling DTLS connection: {:?}", e);
-            // Continue accepting new connections
             continue;
         }
     }

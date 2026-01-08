@@ -1,9 +1,12 @@
 use alloc::vec::Vec;
+use log::{debug, trace};
 
-use super::{HEADER_SIZE, MAX_PAYLOAD, MessageError, PlainMessage};
+use super::{MessageError, PlainMessage, HEADER_SIZE, MAX_PAYLOAD};
+use crate::dtls13::record_layer::DtlsRecordLayer;
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::msgs::base::Payload;
 use crate::msgs::codec::{Codec, Reader};
+use crate::msgs::message::DTLS_HEADER_SIZE;
 use crate::record_layer::RecordLayer;
 
 /// A TLS frame, named `TLSPlaintext` in the standard.
@@ -18,6 +21,10 @@ pub struct OutboundPlainMessage<'a> {
 }
 
 impl OutboundPlainMessage<'_> {
+    pub(crate) fn dtls_encoded_len(&self, record_layer: &DtlsRecordLayer) -> usize {
+        let cid_len = record_layer.write_cid_length();
+        DTLS_HEADER_SIZE + cid_len + record_layer.encrypted_len(self.payload.len())
+    }
     pub(crate) fn encoded_len(&self, record_layer: &RecordLayer) -> usize {
         HEADER_SIZE + record_layer.encrypted_len(self.payload.len())
     }
@@ -286,6 +293,10 @@ pub(crate) fn read_opaque_message_header(
         ProtocolVersion::Unknown(v) if (v & 0xff00) != 0x0300 => {
             return Err(MessageError::UnknownProtocolVersion);
         }
+        ProtocolVersion::DTLSv1_0 | ProtocolVersion::DTLSv1_2 => {
+            // DTLS has a different header
+            return Ok((typ, version, 0));
+        }
         _ => {}
     };
 
@@ -304,6 +315,56 @@ pub(crate) fn read_opaque_message_header(
     }
 
     Ok((typ, version, len))
+}
+
+pub(crate) fn read_dtls_message_header(
+    r: &mut Reader<'_>,
+    cid_len: usize,
+) -> Result<(ContentType, ProtocolVersion, u16, u64, bool, u16), MessageError> {
+    let typ = ContentType::read(r).map_err(|_| MessageError::TooShortForHeader)?;
+    if let ContentType::Unknown(_) = typ {
+        return Err(MessageError::InvalidContentType);
+    }
+    let version = ProtocolVersion::read(r).map_err(|_| MessageError::TooShortForHeader)?;
+    if version != ProtocolVersion::DTLSv1_2 {
+        return Err(MessageError::UnknownProtocolVersion);
+    }
+
+    let epoch = u16::read(r).map_err(|_| MessageError::TooShortForHeader)?;
+    let seq_bytes = r
+        .take(6)
+        .ok_or(MessageError::TooShortForHeader)?;
+    let seq = u64::from_be_bytes([
+        0,
+        0,
+        seq_bytes[0],
+        seq_bytes[1],
+        seq_bytes[2],
+        seq_bytes[3],
+        seq_bytes[4],
+        seq_bytes[5],
+    ]);
+
+    let cid = if cid_len > 0 {
+        r.take(cid_len)
+            .ok_or(MessageError::TooShortForHeader)?;
+        true
+    } else {
+        false
+    };
+
+    let len = u16::read(r).map_err(|_| MessageError::TooShortForHeader)?;
+
+    if typ != ContentType::ApplicationData && len == 0 {
+        return Err(MessageError::InvalidEmptyPayload);
+    }
+
+    // Reject oversize messages
+    if len >= MAX_PAYLOAD {
+        return Err(MessageError::MessageTooLarge);
+    }
+
+    Ok((typ, version, epoch, seq, cid, len))
 }
 
 #[cfg(test)]

@@ -8,11 +8,15 @@ use crate::msgs::enums::{AlertLevel, KeyUpdateRequest};
 use crate::msgs::handshake::{HandshakeMessagePayload, HandshakePayload};
 
 mod inbound;
-pub use inbound::{BorrowedPayload, InboundOpaqueMessage, InboundPlainMessage};
+pub use inbound::{
+    BorrowedPayload, InboundOpaqueMessage, InboundPlainMessage, InboundPlainMessageOwned,
+    ProcessedMessage,
+};
 
 mod outbound;
 use alloc::vec::Vec;
 
+pub(crate) use outbound::read_dtls_message_header;
 pub(crate) use outbound::read_opaque_message_header;
 pub use outbound::{OutboundChunks, OutboundOpaqueMessage, OutboundPlainMessage, PrefixedPayload};
 
@@ -170,6 +174,9 @@ impl Message<'_> {
 
     pub fn build_alert(level: AlertLevel, desc: AlertDescription) -> Self {
         Self {
+            #[cfg(feature = "dtls13")]
+            version: ProtocolVersion::DTLSv1_2,
+            #[cfg(not(feature = "dtls13"))]
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::Alert(AlertMessagePayload {
                 level,
@@ -247,6 +254,8 @@ pub enum MessageError {
 
 /// Content type, version and size.
 pub(crate) const HEADER_SIZE: usize = 1 + 2 + 2;
+
+pub(crate) const DTLS_HEADER_SIZE: usize = 1 + 2 + 2 + 6 + 2;
 
 /// Maximum message payload size.
 /// That's 2^14 payload bytes and a 2KB allowance for ciphertext overheads.

@@ -9,26 +9,33 @@ rustls = { path = "../rustls"}
 log = "0.4.27"
 env_logger = "0.11.8"
 
+[features] 
+dtls13 = ["rustls/dtls13"]
+
 [[example]]
 name = "client"
 path = "examples/client.rs"
+
 
 [[example]]
 name = "server"
 path = "examples/server.rs"
 
-[[example]]
-name = "client_auth"
-path = "examples/client_auth.rs"
 
 [[example]]
-name = "server_full"
-path = "examples/server_full.rs"
+name = "full_client"
+path = "examples/full_client.rs"
+
+
+[[example]]
+name = "full_server"
+path = "examples/full_server.rs"
+
 
 [[example]]
 name = "client_psk"
-path = "examples/client_psk.rs"
+path = "examples/full_client_psk.rs"
 
 [[example]]
 name = "server_psk"
-path = "examples/server_full_psk.rs"
+path = "examples/full_server_psk.rs"

@@ -1,4 +1,5 @@
 use core::ops::{Deref, DerefMut, Range};
+use std::vec::Vec;
 
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{Error, PeerMisbehaved};
@@ -143,6 +144,49 @@ impl InboundPlainMessage<'_> {
     }
 }
 
+#[derive(Debug)]
+pub struct InboundPlainMessageOwned {
+    pub typ: ContentType,
+    pub version: ProtocolVersion,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub enum ProcessedMessage<'a> {
+    Borrowed(InboundPlainMessage<'a>),
+    Owned(InboundPlainMessageOwned),
+}
+
+impl<'a> ProcessedMessage<'a> {
+    pub fn typ(&self) -> ContentType {
+        match self {
+            Self::Borrowed(msg) => msg.typ,
+            Self::Owned(msg) => msg.typ,
+        }
+    }
+
+    pub fn version(&self) -> ProtocolVersion {
+        match self {
+            Self::Borrowed(msg) => msg.version,
+            Self::Owned(msg) => msg.version,
+        }
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(msg) => msg.payload,
+            Self::Owned(msg) => &msg.payload,
+        }
+    }
+
+    pub fn as_plain_message(&self) -> InboundPlainMessage<'_> {
+        InboundPlainMessage {
+            typ: self.typ(),
+            version: self.version(),
+            payload: self.payload(),
+        }
+    }
+}
 /// Decode a TLS1.3 `TLSInnerPlaintext` encoding.
 ///
 /// `p` is a message payload, immediately post-decryption.  This function

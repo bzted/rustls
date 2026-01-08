@@ -31,11 +31,19 @@ pub static TLS13: SupportedProtocolVersion = SupportedProtocolVersion {
     version: ProtocolVersion::TLSv1_3,
 };
 
+/// DTLS1.3
+#[cfg(feature = "dtls13")]
+pub static DTLS13: SupportedProtocolVersion = SupportedProtocolVersion {
+    version: ProtocolVersion::DTLSv1_3,
+};
+
 /// A list of all the protocol versions supported by rustls.
 pub static ALL_VERSIONS: &[&SupportedProtocolVersion] = &[
     &TLS13,
     #[cfg(feature = "tls12")]
     &TLS12,
+    #[cfg(feature = "dtls13")]
+    &DTLS13,
 ];
 
 /// The version configuration that an application should use by default.
@@ -50,6 +58,8 @@ pub(crate) struct EnabledVersions {
     #[cfg(feature = "tls12")]
     tls12: Option<&'static SupportedProtocolVersion>,
     tls13: Option<&'static SupportedProtocolVersion>,
+    #[cfg(feature = "dtls13")]
+    dtls13: Option<&'static SupportedProtocolVersion>,
 }
 
 impl fmt::Debug for EnabledVersions {
@@ -57,6 +67,10 @@ impl fmt::Debug for EnabledVersions {
         let mut list = &mut f.debug_list();
         #[cfg(feature = "tls12")]
         if let Some(v) = self.tls12 {
+            list = list.entry(v);
+        }
+        #[cfg(feature = "dtls13")]
+        if let Some(v) = self.dtls13 {
             list = list.entry(v);
         }
         if let Some(v) = self.tls13 {
@@ -72,6 +86,8 @@ impl EnabledVersions {
             #[cfg(feature = "tls12")]
             tls12: None,
             tls13: None,
+            #[cfg(feature = "dtls13")]
+            dtls13: None,
         };
 
         for v in versions {
@@ -79,6 +95,8 @@ impl EnabledVersions {
                 #[cfg(feature = "tls12")]
                 ProtocolVersion::TLSv1_2 => ev.tls12 = Some(v),
                 ProtocolVersion::TLSv1_3 => ev.tls13 = Some(v),
+                #[cfg(feature = "dtls13")]
+                ProtocolVersion::DTLSv1_3 => ev.dtls13 = Some(v),
                 _ => {}
             }
         }
@@ -91,6 +109,8 @@ impl EnabledVersions {
             #[cfg(feature = "tls12")]
             ProtocolVersion::TLSv1_2 => self.tls12.is_some(),
             ProtocolVersion::TLSv1_3 => self.tls13.is_some(),
+            #[cfg(feature = "dtls13")]
+            ProtocolVersion::DTLSv1_3 => self.dtls13.is_some(),
             _ => false,
         }
     }

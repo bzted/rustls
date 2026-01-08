@@ -4,14 +4,13 @@ use core::fmt;
 use core::fmt::{Debug, Formatter};
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
+use log::debug;
 #[cfg(feature = "std")]
 use std::io;
 
 use pki_types::{DnsName, UnixTime};
 
 use super::hs;
-#[cfg(feature = "std")]
-use crate::WantsVerifier;
 use crate::builder::ConfigBuilder;
 use crate::common_state::{CommonState, Side};
 #[cfg(feature = "std")]
@@ -20,6 +19,7 @@ use crate::conn::{ConnectionCommon, ConnectionCore, UnbufferedConnectionCommon};
 #[cfg(doc)]
 use crate::crypto;
 use crate::crypto::CryptoProvider;
+use crate::dtls13::record_layer::DtlsRecordLayer;
 use crate::enums::{CipherSuite, ProtocolVersion, SignatureScheme};
 use crate::error::Error;
 use crate::log::trace;
@@ -33,7 +33,9 @@ use crate::sync::Arc;
 use crate::time_provider::DefaultTimeProvider;
 use crate::time_provider::TimeProvider;
 use crate::vecbuf::ChunkVecBuffer;
-use crate::{DistinguishedName, KeyLog, WantsVersions, compress, sign, verify, versions};
+#[cfg(feature = "std")]
+use crate::WantsVerifier;
+use crate::{compress, sign, verify, versions, DistinguishedName, KeyLog, WantsVersions};
 
 /// A trait for the ability to store server session data.
 ///

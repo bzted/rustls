@@ -432,11 +432,13 @@ pub mod compress;
 mod conn;
 /// Crypto provider interface.
 pub mod crypto;
+mod dtls13;
 mod error;
 mod hash_hs;
 #[cfg(any(feature = "std", feature = "hashbrown"))]
 mod limited_cache;
 mod rand;
+mod record_common;
 mod record_layer;
 #[cfg(feature = "std")]
 mod stream;

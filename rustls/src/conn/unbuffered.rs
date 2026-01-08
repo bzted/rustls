@@ -7,10 +7,10 @@ use core::{fmt, mem};
 use std::error::Error as StdError;
 
 use super::UnbufferedConnectionCommon;
-use crate::Error;
 use crate::client::ClientConnectionData;
 use crate::msgs::deframer::buffers::DeframerSliceBuffer;
 use crate::server::ServerConnectionData;
+use crate::Error;
 
 impl UnbufferedConnectionCommon<ClientConnectionData> {
     /// Processes the TLS records in `incoming_tls` buffer until a new [`UnbufferedStatus`] is
@@ -79,7 +79,6 @@ impl<Data> UnbufferedConnectionCommon<Data> {
                     EncodeTlsData::new(self, chunk).into(),
                 );
             }
-
             let deframer_output =
                 match self
                     .core
@@ -109,7 +108,10 @@ impl<Data> UnbufferedConnectionCommon<Data> {
                         }
                     };
 
-                match self.core.process_msg(msg, state, None) {
+                match self
+                    .core
+                    .process_msg(msg.as_plain_message(), state, None)
+                {
                     Ok(new) => state = new,
 
                     Err(e) => {

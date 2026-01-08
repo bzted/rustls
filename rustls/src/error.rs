@@ -281,6 +281,8 @@ pub enum PeerMisbehaved {
     UnsolicitedSctList,
     UnsolicitedServerHelloExtension,
     WrongGroupForKeyShare,
+    WrongProtocolVersion,
+    IllegalCookieLength,
     UnsolicitedEchExtension,
 }
 

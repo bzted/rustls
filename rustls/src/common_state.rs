@@ -1,7 +1,9 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use log::trace;
 use pki_types::CertificateDer;
+use x509_parser::der_parser::rusticata_macros::debug;
 
 use crate::crypto::SupportedKxGroup;
 use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
@@ -10,15 +12,16 @@ use crate::hash_hs::HandshakeHash;
 use crate::log::{debug, error, warn};
 use crate::msgs::alert::AlertMessagePayload;
 use crate::msgs::base::Payload;
-use crate::msgs::codec::Codec;
+use crate::msgs::codec::{u24, Codec, Reader};
 use crate::msgs::enums::{AlertLevel, KeyUpdateRequest};
-use crate::msgs::fragmenter::MessageFragmenter;
+use crate::msgs::fragmenter::{DtlsFragment, DtlsFragmenter, MessageFragmenter};
 use crate::msgs::handshake::{CertificateChain, HandshakeMessagePayload};
 use crate::msgs::message::{
     Message, MessagePayload, OutboundChunks, OutboundOpaqueMessage, OutboundPlainMessage,
     PlainMessage,
 };
-use crate::record_layer::PreEncryptAction;
+use crate::record_common::AnyRecordLayer;
+use crate::record_layer::{PreEncryptAction, RecordLayer};
 use crate::suites::{PartiallyExtractedSecrets, SupportedCipherSuite};
 #[cfg(feature = "tls12")]
 use crate::tls12::ConnectionSecrets;
@@ -31,7 +34,8 @@ pub struct CommonState {
     pub(crate) negotiated_version: Option<ProtocolVersion>,
     pub(crate) handshake_kind: Option<HandshakeKind>,
     pub(crate) side: Side,
-    pub(crate) record_layer: record_layer::RecordLayer,
+    //pub(crate) record_layer: RecordLayer,
+    pub(crate) record_layer: AnyRecordLayer, // pruebas
     pub(crate) suite: Option<SupportedCipherSuite>,
     pub(crate) kx_state: KxState,
     pub(crate) alpn_protocol: Option<Vec<u8>>,
@@ -51,7 +55,6 @@ pub struct CommonState {
     pub(crate) received_plaintext: ChunkVecBuffer,
     pub(crate) sendable_tls: ChunkVecBuffer,
     queued_key_update_message: Option<Vec<u8>>,
-
     /// Protocol whose key schedule should be used. Unused for TLS < 1.3.
     pub(crate) protocol: Protocol,
     pub(crate) quic: quic::Quic,
@@ -59,6 +62,8 @@ pub struct CommonState {
     temper_counters: TemperCounters,
     pub(crate) refresh_traffic_keys_pending: bool,
     pub(crate) fips: bool,
+    dtls_fragmenter: DtlsFragmenter,
+    dtls_next_seq: u16,
 }
 
 impl CommonState {
@@ -67,7 +72,8 @@ impl CommonState {
             negotiated_version: None,
             handshake_kind: None,
             side,
-            record_layer: record_layer::RecordLayer::new(),
+            //record_layer: RecordLayer::new(),
+            record_layer: AnyRecordLayer::Tls(record_layer::RecordLayer::new()),
             suite: None,
             kx_state: KxState::default(),
             alpn_protocol: None,
@@ -91,6 +97,8 @@ impl CommonState {
             temper_counters: TemperCounters::default(),
             refresh_traffic_keys_pending: false,
             fips: false,
+            dtls_fragmenter: DtlsFragmenter::default(),
+            dtls_next_seq: 0,
         }
     }
 
@@ -292,6 +300,10 @@ impl CommonState {
     // been protected with two different record layer protections,
     // which is illegal.  Not mentioned in RFC.
     pub(crate) fn check_aligned_handshake(&mut self) -> Result<(), Error> {
+        // Always aligned for dtls
+        if self.is_dtls() {
+            return Ok(());
+        }
         if !self.aligned_handshake {
             Err(self.send_fatal_alert(
                 AlertDescription::UnexpectedMessage,
@@ -344,8 +356,14 @@ impl CommonState {
     fn send_single_fragment(&mut self, m: OutboundPlainMessage<'_>) {
         if m.typ == ContentType::Alert {
             // Alerts are always sendable -- never quashed by a PreEncryptAction.
-            let em = self.record_layer.encrypt_outgoing(m);
-            self.queue_tls_message(em);
+            //let em = self.record_layer.encrypt_outgoing(m);
+            //self.queue_tls_message(em);
+            let em = self.record_layer.encrypt_fragment(m);
+            match self.record_layer {
+                AnyRecordLayer::Tls(_) => self.perhaps_write_key_update(),
+                AnyRecordLayer::Dtls(_) => {}
+            }
+            self.sendable_tls.append(em.0);
             return;
         }
 
@@ -380,8 +398,14 @@ impl CommonState {
             }
         };
 
-        let em = self.record_layer.encrypt_outgoing(m);
-        self.queue_tls_message(em);
+        //let em = self.record_layer.encrypt_outgoing(m);
+        //self.queue_tls_message(em);
+        let em = self.record_layer.encrypt_fragment(m);
+        match self.record_layer {
+            AnyRecordLayer::Tls(_) => self.perhaps_write_key_update(),
+            AnyRecordLayer::Dtls(_) => {}
+        }
+        self.sendable_tls.append(em.0);
     }
 
     fn send_plain_non_buffering(&mut self, payload: OutboundChunks<'_>, limit: Limit) -> usize {
@@ -463,6 +487,12 @@ impl CommonState {
                 }
                 return;
             }
+
+            if self.is_dtls() {
+                debug!("Protocol is UDP");
+                self.send_dtls_msg(m, must_encrypt);
+                return;
+            }
         }
         if !must_encrypt {
             let msg = &m.into();
@@ -474,6 +504,162 @@ impl CommonState {
             }
         } else {
             self.send_msg_encrypt(m.into());
+        }
+    }
+
+    fn send_dtls_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
+        let epoch = self.record_layer.write_epoch();
+        let encrypt = if epoch == 0 { false } else { must_encrypt };
+
+        match m.payload {
+            MessagePayload::HandshakeFlight(flight) => {
+                debug!("Flight len: {:?}", flight.bytes().len());
+                self.record_layer.start_flight();
+                let fragments = match self.fragment_dtls13_handshake_flight(&flight) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        self.send_fatal_alert(AlertDescription::DecodeError, e);
+                        return;
+                    }
+                };
+
+                let mut datagrams = Vec::new();
+                let mut record_numbers = Vec::new();
+
+                for fragment in fragments {
+                    let mut bytes = Vec::new();
+                    fragment.encode(&mut bytes);
+                    debug!(
+                        "Message length: {:?}, Fragment length: {:?}",
+                        fragment.length, fragment.fragment_length
+                    );
+                    trace!("Fragment: {:?}", fragment.fragment);
+
+                    let plain = OutboundPlainMessage {
+                        typ: ContentType::Handshake,
+                        version: ProtocolVersion::DTLSv1_2, // legacy,
+                        payload: bytes.as_slice().into(),
+                    };
+
+                    let (record_bytes, seq) = if encrypt {
+                        self.record_layer
+                            .encrypt_fragment(plain)
+                    } else {
+                        self.record_layer
+                            .write_dtls_plain_record(plain)
+                    };
+
+                    record_numbers.push(seq);
+                    datagrams.push(record_bytes.clone());
+
+                    trace!(
+                        "Record bytes length: {:?}, Record bytes (20B): {:?}",
+                        record_bytes.len(),
+                        &record_bytes[..record_bytes.len().min(20)]
+                    );
+                    self.sendable_tls.append(record_bytes);
+                }
+
+                self.record_layer
+                    .add_record(datagrams, record_numbers);
+                self.record_layer.mark_sent();
+            }
+
+            MessagePayload::Handshake { parsed, encoded } => {
+                self.record_layer.start_flight();
+                let fragments = match self.fragment_dtls13_handshake_flight(&encoded) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        self.send_fatal_alert(AlertDescription::DecodeError, e);
+                        return;
+                    }
+                };
+
+                let mut datagrams = Vec::new();
+                let mut record_numbers = Vec::new();
+
+                for fragment in fragments {
+                    let mut bytes = Vec::new();
+                    fragment.encode(&mut bytes);
+                    debug!(
+                        "Message length: {:?}, Fragment length: {:?}",
+                        fragment.length, fragment.fragment_length
+                    );
+                    trace!("Fragment: {:?}", fragment.fragment);
+
+                    let plain = OutboundPlainMessage {
+                        typ: ContentType::Handshake,
+                        version: ProtocolVersion::DTLSv1_2, // legacy,
+                        payload: bytes.as_slice().into(),
+                    };
+
+                    let (record_bytes, seq) = if encrypt {
+                        self.record_layer
+                            .encrypt_fragment(plain)
+                    } else {
+                        self.record_layer
+                            .write_dtls_plain_record(plain)
+                    };
+
+                    record_numbers.push(seq);
+                    datagrams.push(record_bytes.clone());
+
+                    trace!(
+                        "Message type: {:?} , Handshake record bytes length: {:?}, Record bytes(20B): {:?}",
+                        parsed.typ,
+                        record_bytes.len(),
+                        &record_bytes[..record_bytes.len().min(20)]
+                    );
+
+                    self.sendable_tls.append(record_bytes);
+                }
+
+                self.record_layer
+                    .add_record(datagrams, record_numbers);
+                self.record_layer.mark_sent();
+            }
+
+            MessagePayload::ApplicationData(data) => {
+                let chunks = self.dtls_fragmenter.fragment_payload(
+                    ContentType::ApplicationData,
+                    ProtocolVersion::DTLSv1_2,
+                    data.bytes().into(),
+                );
+
+                for chunk in chunks {
+                    let bytes = if encrypt {
+                        self.record_layer
+                            .encrypt_fragment(chunk)
+                    } else {
+                        self.record_layer
+                            .write_dtls_plain_record(chunk)
+                    };
+
+                    self.sendable_tls.append(bytes.0);
+                }
+            }
+
+            _ => {
+                let msg = &m.into();
+                let iter = self
+                    .message_fragmenter
+                    .fragment_message(msg);
+
+                for m in iter {
+                    let bytes = if encrypt {
+                        self.record_layer.encrypt_fragment(m)
+                    } else {
+                        self.record_layer
+                            .write_dtls_plain_record(m)
+                    };
+                    trace!(
+                        "Record bytes length: {:?}, Record bytes (20B): {:?}",
+                        bytes.0.len(),
+                        &bytes.0[..bytes.0.len().min(20)]
+                    );
+                    self.sendable_tls.append(bytes.0);
+                }
+            }
         }
     }
 
@@ -606,7 +792,7 @@ impl CommonState {
         let mut required_size = self.sendable_tls.len();
 
         for m in fragments {
-            required_size += m.encoded_len(&self.record_layer);
+            required_size += self.record_layer.encoded_len(&m);
         }
 
         if required_size > outgoing_tls.len() {
@@ -634,21 +820,57 @@ impl CommonState {
         }
 
         for m in fragments {
-            let em = self
-                .record_layer
-                .encrypt_outgoing(m)
-                .encode();
+            let em = self.record_layer.encrypt_fragment(m);
 
-            let len = em.len();
-            outgoing_tls[written..written + len].copy_from_slice(&em);
+            let len = em.0.len();
+            outgoing_tls[written..written + len].copy_from_slice(&em.0);
             written += len;
         }
 
         written
     }
 
+    fn fragment_dtls13_handshake_flight(
+        &mut self,
+        payload: &Payload<'_>,
+    ) -> Result<Vec<DtlsFragment>, Error> {
+        let mut r = Reader::init(payload.bytes());
+        let mut fragments = Vec::new();
+
+        while r.any_left() {
+            let Ok(typ) = HandshakeType::read(&mut r) else {
+                return Err(Error::InvalidMessage(InvalidMessage::InvalidContentType));
+            };
+
+            let len = match u24::read(&mut r) {
+                Ok(n) => n.0 as usize,
+                Err(_) => return Err(Error::InvalidMessage(InvalidMessage::InvalidContentType)),
+            };
+
+            let Some(body) = r.take(len) else {
+                return Err(Error::InvalidMessage(InvalidMessage::InvalidContentType));
+            };
+
+            let msg_seq = self.dtls_next_seq;
+            self.dtls_next_seq = self.dtls_next_seq.wrapping_add(1);
+
+            let mut frags = self
+                .dtls_fragmenter
+                .fragment_handshake_message(typ, msg_seq, body);
+
+            fragments.append(&mut frags);
+        }
+        debug!("nº Fragments: {:?}", fragments.len());
+        Ok(fragments)
+    }
+
     pub(crate) fn set_max_fragment_size(&mut self, new: Option<usize>) -> Result<(), Error> {
         self.message_fragmenter
+            .set_max_fragment_size(new)
+    }
+
+    pub(crate) fn set_dtls_max_fragment_size(&mut self, new: Option<usize>) -> Result<(), Error> {
+        self.dtls_fragmenter
             .set_max_fragment_size(new)
     }
 
@@ -691,10 +913,17 @@ impl CommonState {
         self.protocol == Protocol::Quic
     }
 
+    pub(crate) fn is_dtls(&self) -> bool {
+        self.protocol == Protocol::Udp
+    }
+
     pub(crate) fn should_update_key(
         &mut self,
         key_update_request: &KeyUpdateRequest,
     ) -> Result<bool, Error> {
+        if self.protocol == Protocol::Udp {
+            return Ok(false);
+        }
         self.temper_counters
             .received_key_update_request()?;
 
@@ -712,8 +941,8 @@ impl CommonState {
         let message = PlainMessage::from(Message::build_key_update_notify());
         self.queued_key_update_message = Some(
             self.record_layer
-                .encrypt_outgoing(message.borrow_outbound())
-                .encode(),
+                .encrypt_fragment(message.borrow_outbound())
+                .0,
         );
     }
 
@@ -900,6 +1129,7 @@ impl Side {
 pub(crate) enum Protocol {
     Tcp,
     Quic,
+    Udp,
 }
 
 enum Limit {

@@ -563,7 +563,10 @@ mod client_hello {
             ckx.group,
             ckx.pub_key,
         )));
-        extensions.push(ServerExtension::SupportedVersions(ProtocolVersion::TLSv1_3));
+        /*extensions.push(ServerExtension::SupportedVersions(
+            ProtocolVersion::DTLSv1_3,
+        ));
+        extensions.push(ServerExtension::SupportedVersions(ProtocolVersion::TLSv1_3));*/
 
         if authkem_psk_ss.is_some() {
             extensions.push(ServerExtension::StoredAuthKey);
@@ -577,12 +580,25 @@ mod client_hello {
             extensions.push(ServerExtension::PresharedKey(psk_idx as u16));
         }
 
+        let legacy_version = match cx.common.protocol {
+            Protocol::Tcp | Protocol::Quic => {
+                extensions.push(ServerExtension::SupportedVersions(ProtocolVersion::TLSv1_3));
+                ProtocolVersion::TLSv1_2
+            }
+            Protocol::Udp => {
+                extensions.push(ServerExtension::SupportedVersions(
+                    ProtocolVersion::DTLSv1_3,
+                ));
+                ProtocolVersion::DTLSv1_2
+            }
+        };
+
         let sh = Message {
-            version: ProtocolVersion::TLSv1_2,
+            version: legacy_version,
             payload: MessagePayload::handshake(HandshakeMessagePayload {
                 typ: HandshakeType::ServerHello,
                 payload: HandshakePayload::ServerHello(ServerHelloPayload {
-                    legacy_version: ProtocolVersion::TLSv1_2,
+                    legacy_version,
                     random: Random::from(randoms.server),
                     session_id: *session_id,
                     cipher_suite: suite.common.suite,
@@ -591,7 +607,6 @@ mod client_hello {
                 }),
             }),
         };
-
         cx.common.check_aligned_handshake()?;
 
         let client_hello_hash = transcript.hash_given(&[]);
@@ -640,6 +655,10 @@ mod client_hello {
     }
 
     fn emit_fake_ccs(common: &mut CommonState) {
+        if common.protocol == Protocol::Udp {
+            return;
+        }
+
         if common.is_quic() {
             return;
         }
@@ -666,13 +685,24 @@ mod client_hello {
 
         req.extensions
             .push(HelloRetryExtension::KeyShare(group));
+
+        req.extensions
+            .push(HelloRetryExtension::SupportedVersions(
+                ProtocolVersion::DTLSv1_3,
+            ));
+
         req.extensions
             .push(HelloRetryExtension::SupportedVersions(
                 ProtocolVersion::TLSv1_3,
             ));
 
+        let version = match common.protocol {
+            Protocol::Tcp | Protocol::Quic => ProtocolVersion::TLSv1_2,
+            Protocol::Udp => ProtocolVersion::DTLSv1_2,
+        };
+
         let m = Message {
-            version: ProtocolVersion::TLSv1_2,
+            version,
             payload: MessagePayload::handshake(HandshakeMessagePayload {
                 typ: HandshakeType::HelloRetryRequest,
                 payload: HandshakePayload::HelloRetryRequest(req),
@@ -1274,7 +1304,7 @@ impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
                 send_tickets: self.send_tickets,
             }))
         } else {
-            let key_schedule = auth_handhsake_key_schedule.into_main_secret(None);
+            let key_schedule = auth_handhsake_key_schedule.into_main_secret(None, cx.common);
             debug!("SERVER GOING INTO EXPECT CLIENT FINISHED");
             Ok(Box::new(ExpectClientFinished {
                 config: self.config,
@@ -1332,7 +1362,9 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
                 return Err(Error::NoCertificatesPresented);
             }
             debug!("CLIENT AUTH NOT MANDATORY, CONTINUING W/O CLIENT AUTH");
-            let key_schedule = self.key_schedule.into_main_secret(None);
+            let key_schedule = self
+                .key_schedule
+                .into_main_secret(None, cx.common);
 
             return Ok(Box::new(ExpectClientFinished {
                 config: self.config,
@@ -1370,7 +1402,7 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
 
         let key_schedule = self
             .key_schedule
-            .into_main_secret(Some(&client_ss));
+            .into_main_secret(Some(&client_ss), cx.common);
 
         cx.common.peer_certificates = Some(owned_chain.clone());
 

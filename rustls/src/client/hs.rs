@@ -31,6 +31,7 @@ use crate::msgs::base::PayloadU8;
 use crate::msgs::enums::{
     CertificateType, Compression, ECPointFormat, ExtensionType, PSKKeyExchangeMode,
 };
+use crate::msgs::fragmenter::DtlsFragment;
 use crate::msgs::handshake::EarlyAuth;
 use crate::msgs::handshake::StoredAuthKey;
 use crate::msgs::handshake::{
@@ -40,6 +41,7 @@ use crate::msgs::handshake::{
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist;
+use crate::server;
 use crate::sync::Arc;
 use crate::tls13::key_schedule::KeyScheduleEarly;
 use crate::verify::ServerCertVerifier;
@@ -120,7 +122,9 @@ pub(super) fn start_handshake(
 
     let mut resuming = find_session(&server_name, &config, cx);
 
-    let key_share = if config.supports_version(ProtocolVersion::TLSv1_3) {
+    let key_share = if config.supports_version(ProtocolVersion::TLSv1_3)
+        || config.supports_version(ProtocolVersion::DTLSv1_3)
+    {
         Some(tls13::initial_key_share(
             &config,
             &server_name,
@@ -241,9 +245,10 @@ fn emit_client_hello_for_retry(
     let config = &input.config;
     // Defense in depth: the ECH state should be None if ECH is disabled based on config
     // builder semantics.
-    let forbids_tls12 = cx.common.is_quic() || ech_state.is_some();
+    let forbids_tls12 = cx.common.is_dtls() || cx.common.is_quic() || ech_state.is_some();
     let support_tls12 = config.supports_version(ProtocolVersion::TLSv1_2) && !forbids_tls12;
     let support_tls13 = config.supports_version(ProtocolVersion::TLSv1_3);
+    let support_dtls13 = config.supports_version(ProtocolVersion::DTLSv1_3);
 
     let mut supported_versions = Vec::new();
     if support_tls13 {
@@ -254,6 +259,9 @@ fn emit_client_hello_for_retry(
         supported_versions.push(ProtocolVersion::TLSv1_2);
     }
 
+    if support_dtls13 {
+        supported_versions.push(ProtocolVersion::DTLSv1_3);
+    }
     // should be unreachable thanks to config builder
     assert!(!supported_versions.is_empty());
 
@@ -320,7 +328,7 @@ fn emit_client_hello_for_retry(
     };
 
     if let Some(key_share) = &key_share {
-        debug_assert!(support_tls13);
+        debug_assert!(support_tls13 || support_dtls13);
         let mut shares = vec![KeyShareEntry::new(key_share.group(), key_share.pub_key())];
 
         if !retryreq
@@ -477,10 +485,19 @@ fn emit_client_hello_for_retry(
     // We don't do renegotiation at all, in fact.
     cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
 
+    let is_dtls = matches!(cx.common.protocol, crate::common_state::Protocol::Udp);
+    let client_version = if is_dtls {
+        ProtocolVersion::DTLSv1_2
+    } else {
+        ProtocolVersion::TLSv1_2
+    };
+
     let mut chp_payload = ClientHelloPayload {
-        client_version: ProtocolVersion::TLSv1_2,
+        client_version,
         random: input.random,
         session_id: input.session_id,
+        #[cfg(feature = "dtls13")]
+        legacy_cookie: PayloadU8::empty(),
         cipher_suites,
         compression_methods: vec![Compression::Null],
         extensions: exts,
@@ -590,18 +607,30 @@ fn emit_client_hello_for_retry(
         _ => None,
     };
 
+    let record_version = if is_dtls {
+        ProtocolVersion::DTLSv1_2
+    } else {
+        ProtocolVersion::TLSv1_2
+    };
+
     let ch = Message {
         version: match retryreq {
             // <https://datatracker.ietf.org/doc/html/rfc8446#section-5.1>:
             // "This value MUST be set to 0x0303 for all records generated
             //  by a TLS 1.3 implementation ..."
-            Some(_) => ProtocolVersion::TLSv1_2,
+            Some(_) => record_version,
             // "... other than an initial ClientHello (i.e., one not
             // generated after a HelloRetryRequest), where it MAY also be
             // 0x0301 for compatibility purposes"
             //
             // (retryreq == None means we're in the "initial ClientHello" case)
-            None => ProtocolVersion::TLSv1_0,
+            None => {
+                if is_dtls {
+                    ProtocolVersion::DTLSv1_0
+                } else {
+                    ProtocolVersion::TLSv1_0
+                }
+            }
         },
         payload: MessagePayload::handshake(chp),
     };
@@ -847,19 +876,22 @@ impl State<ClientConnectionData> for ExpectServerHello {
             require_handshake_msg!(m, HandshakeType::ServerHello, HandshakePayload::ServerHello)?;
         trace!("We got ServerHello {:#?}", server_hello);
 
-        use crate::ProtocolVersion::{TLSv1_2, TLSv1_3};
+        use crate::ProtocolVersion::{DTLSv1_2, DTLSv1_3, TLSv1_2, TLSv1_3};
         let config = &self.input.config;
         let tls13_supported = config.supports_version(TLSv1_3);
+        let dtls13_supported = config.supports_version(DTLSv1_3);
 
-        let server_version = if server_hello.legacy_version == TLSv1_2 {
-            server_hello
-                .supported_versions()
-                .unwrap_or(server_hello.legacy_version)
-        } else {
-            server_hello.legacy_version
-        };
+        let server_version =
+            if server_hello.legacy_version == TLSv1_2 || server_hello.legacy_version == DTLSv1_2 {
+                server_hello
+                    .supported_versions()
+                    .unwrap_or(server_hello.legacy_version)
+            } else {
+                server_hello.legacy_version
+            };
 
         let version = match server_version {
+            DTLSv1_3 if dtls13_supported => DTLSv1_3,
             TLSv1_3 if tls13_supported => TLSv1_3,
             TLSv1_2 if config.supports_version(TLSv1_2) => {
                 if cx.data.early_data.is_enabled() && cx.common.early_traffic {
@@ -884,7 +916,9 @@ impl State<ClientConnectionData> for ExpectServerHello {
             }
             _ => {
                 let reason = match server_version {
-                    TLSv1_2 | TLSv1_3 => PeerIncompatible::ServerTlsVersionIsDisabledByOurConfig,
+                    TLSv1_2 | TLSv1_3 | DTLSv1_3 => {
+                        PeerIncompatible::ServerTlsVersionIsDisabledByOurConfig
+                    }
                     _ => PeerIncompatible::ServerDoesNotSupportTls12Or13,
                 };
                 return Err(cx

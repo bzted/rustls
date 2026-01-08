@@ -10,6 +10,7 @@ use super::tls12;
 use crate::common_state::{KxState, Protocol, State};
 use crate::conn::ConnectionRandoms;
 use crate::crypto::SupportedKxGroup;
+use crate::dtls13::record_layer::DtlsRecordLayer;
 use crate::enums::{
     AlertDescription, CipherSuite, HandshakeType, ProtocolVersion, SignatureAlgorithm,
     SignatureScheme,
@@ -17,6 +18,8 @@ use crate::enums::{
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::log::{debug, trace};
+#[cfg(feature = "dtls13")]
+use crate::msgs::base::{PayloadU16, PayloadU8};
 use crate::msgs::enums::{CertificateType, Compression, ExtensionType, NamedGroup};
 #[cfg(feature = "tls12")]
 use crate::msgs::handshake::SessionId;
@@ -27,9 +30,9 @@ use crate::msgs::handshake::{
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist;
 use crate::server::common::ActiveCertifiedKey;
-use crate::server::{ClientHello, ServerConfig, tls13};
+use crate::server::{tls13, ClientHello, ServerConfig};
 use crate::sync::Arc;
-use crate::{SupportedCipherSuite, suites};
+use crate::{client, suites, SupportedCipherSuite};
 
 pub(super) type NextState<'a> = Box<dyn State<ServerConnectionData> + 'a>;
 pub(super) type NextStateOrError<'a> = Result<NextState<'a>, Error>;
@@ -341,11 +344,20 @@ impl ExpectClientHello {
         let tls12_enabled = self
             .config
             .supports_version(ProtocolVersion::TLSv1_2);
+        let dtls13_enabled = self
+            .config
+            .supports_version(ProtocolVersion::DTLSv1_3);
 
         // Are we doing TLS1.3?
         let maybe_versions_ext = client_hello.versions_extension();
         let version = if let Some(versions) = maybe_versions_ext {
-            if versions.contains(&ProtocolVersion::TLSv1_3) && tls13_enabled {
+            if versions.contains(&ProtocolVersion::DTLSv1_3) && dtls13_enabled {
+                /*cx.common.protocol = Protocol::Udp;
+                cx.common.record_layer = crate::dtls13::record_common::AnyRecordLayer::Dtls(
+                    Box::new(DtlsRecordLayer::new()),
+                );*/
+                ProtocolVersion::DTLSv1_3
+            } else if versions.contains(&ProtocolVersion::TLSv1_3) && tls13_enabled {
                 ProtocolVersion::TLSv1_3
             } else if !versions.contains(&ProtocolVersion::TLSv1_2) || !tls12_enabled {
                 return Err(cx.common.send_fatal_alert(
@@ -381,6 +393,15 @@ impl ExpectClientHello {
 
         cx.common.negotiated_version = Some(version);
 
+        #[cfg(feature = "dtls13")]
+        if cx.common.negotiated_version == Some(ProtocolVersion::DTLSv1_3)
+            && client_hello.legacy_cookie != PayloadU8::empty()
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::IllegalCookieLength,
+            ));
+        }
         // We communicate to the upper layer what kind of key they should choose
         // via the sigschemes value.  Clients tend to treat this extension
         // orthogonally to offered ciphersuites (even though, in TLS1.2 it is not).
@@ -672,7 +693,6 @@ pub(super) fn process_client_hello<'m>(
 ) -> Result<(&'m ClientHelloPayload, Vec<SignatureScheme>), Error> {
     let client_hello =
         require_handshake_msg!(m, HandshakeType::ClientHello, HandshakePayload::ClientHello)?;
-    trace!("we got a clienthello {:?}", client_hello);
 
     if !client_hello
         .compression_methods
@@ -693,7 +713,6 @@ pub(super) fn process_client_hello<'m>(
 
     // No handshake messages should follow this one in this flight.
     cx.common.check_aligned_handshake()?;
-
     // Extract and validate the SNI DNS name, if any, before giving it to
     // the cert resolver. In particular, if it is invalid then we should
     // send an Illegal Parameter alert instead of the Internal Error alert

@@ -73,6 +73,8 @@ enum_builder! {
         CompressedCertificate => 0x19,
         MessageHash => 0xfe,
         KemEncapsulation => 0x30, // Added KemEncapsulation message
+        RequestConnectionId => 0x09, // New DTLS 1.3
+        NewConnectionId => 0x0a, // New DTLS 1.3
     }
 }
 
@@ -87,6 +89,7 @@ enum_builder! {
         Handshake => 0x16,
         ApplicationData => 0x17,
         Heartbeat => 0x18,
+        Ack => 0x1A, // DTLS Ack
     }
 }
 

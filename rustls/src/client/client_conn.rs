@@ -2,6 +2,7 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::{fmt, mem};
+use std::boxed::Box;
 
 use pki_types::{ServerName, UnixTime};
 
@@ -12,6 +13,7 @@ use crate::client::{EchMode, EchStatus};
 use crate::common_state::{CommonState, Protocol, Side};
 use crate::conn::{ConnectionCore, UnbufferedConnectionCommon};
 use crate::crypto::{CryptoProvider, SupportedKxGroup};
+use crate::dtls13::record_layer::DtlsRecordLayer;
 use crate::enums::{CipherSuite, ProtocolVersion, SignatureScheme};
 use crate::error::Error;
 use crate::log::trace;
@@ -714,6 +716,17 @@ mod connection {
             })
         }
 
+        /// Make a new ClientConnection.  `config` controls how
+        /// we behave in the DTLS protocol, `name` is the
+        /// name of the server we want to talk to.
+        pub fn new_dtls(
+            config: Arc<ClientConfig>,
+            name: ServerName<'static>,
+        ) -> Result<Self, Error> {
+            Ok(Self {
+                inner: ConnectionCore::for_client(config, name, Vec::new(), Protocol::Udp)?.into(),
+            })
+        }
         /// Returns an `io::Write` implementer you can write bytes to
         /// to send TLS1.3 early data (a.k.a. "0-RTT data") to the server.
         ///
@@ -833,9 +846,14 @@ impl ConnectionCore<ClientConnectionData> {
     ) -> Result<Self, Error> {
         let mut common_state = CommonState::new(Side::Client);
         common_state.set_max_fragment_size(config.max_fragment_size)?;
+        common_state.set_dtls_max_fragment_size(config.max_fragment_size)?;
         common_state.protocol = proto;
         common_state.enable_secret_extraction = config.enable_secret_extraction;
         common_state.fips = config.fips();
+        if proto == Protocol::Udp {
+            common_state.record_layer =
+                crate::record_common::AnyRecordLayer::Dtls(Box::new(DtlsRecordLayer::new()));
+        }
         let mut data = ClientConnectionData::new();
 
         let mut cx = hs::ClientContext {

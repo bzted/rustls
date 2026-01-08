@@ -1,10 +1,15 @@
 use core::mem;
 
+use log::debug;
+
 use crate::error::{Error, InvalidMessage};
 use crate::msgs::codec::Reader;
 use crate::msgs::message::{
-    HEADER_SIZE, InboundOpaqueMessage, MessageError, read_opaque_message_header,
+    read_dtls_message_header, read_opaque_message_header, InboundOpaqueMessage, MessageError,
+    DTLS_HEADER_SIZE, HEADER_SIZE,
 };
+use crate::record_common::IncomingRecord;
+use crate::ProtocolVersion;
 
 pub(crate) mod buffers;
 pub(crate) mod handshake;
@@ -27,12 +32,17 @@ pub(crate) mod handshake;
 pub(crate) struct DeframerIter<'a> {
     buf: &'a mut [u8],
     consumed: usize,
+    cid_len: usize,
 }
 
 impl<'a> DeframerIter<'a> {
     /// Make a new `DeframerIter`
-    pub(crate) fn new(buf: &'a mut [u8]) -> Self {
-        Self { buf, consumed: 0 }
+    pub(crate) fn new(buf: &'a mut [u8], cid_len: usize) -> Self {
+        Self {
+            buf,
+            consumed: 0,
+            cid_len,
+        }
     }
 
     /// How many bytes were processed successfully from the front
@@ -40,10 +50,68 @@ impl<'a> DeframerIter<'a> {
     pub(crate) fn bytes_consumed(&self) -> usize {
         self.consumed
     }
+
+    fn process_dtls_message(&mut self) -> Option<Result<IncomingRecord<'a>, Error>> {
+        debug!("Processing DTLS message");
+        let (typ, version, epoch, seq, cid, len) = {
+            let mut reader = Reader::init(self.buf);
+            match read_dtls_message_header(&mut reader, self.cid_len) {
+                Ok(h) => h,
+                Err(err) => {
+                    let err = match err {
+                        MessageError::TooShortForHeader | MessageError::TooShortForLength => {
+                            return None;
+                        }
+                        MessageError::InvalidEmptyPayload => InvalidMessage::InvalidEmptyPayload,
+                        MessageError::MessageTooLarge => InvalidMessage::MessageTooLarge,
+                        MessageError::InvalidContentType => InvalidMessage::InvalidContentType,
+                        MessageError::UnknownProtocolVersion => {
+                            InvalidMessage::UnknownProtocolVersion
+                        }
+                    };
+                    return Some(Err(err.into()));
+                }
+            }
+        };
+
+        let header_len = DTLS_HEADER_SIZE + self.cid_len;
+        let end = header_len + len as usize;
+        self.buf.get(header_len..end)?;
+
+        let (consumed, remainder) = mem::take(&mut self.buf).split_at_mut(end);
+        self.buf = remainder;
+        self.consumed += end;
+
+        let (header, body) = consumed.split_at_mut(header_len);
+
+        let cid_slice = if cid {
+            Some(&header[11..11 + self.cid_len])
+        } else {
+            None
+        };
+
+        debug!(
+            "Type: {:?}, Version: {:?}, Epoch: {:?}, seq: {:?}, length: {:?}, cid: {:?}",
+            typ,
+            version,
+            epoch,
+            seq,
+            body.len(),
+            cid_slice
+        );
+
+        let opaque = InboundOpaqueMessage::new(typ, version, body);
+        Some(Ok(IncomingRecord {
+            opaque,
+            epoch: Some(epoch),
+            seq: Some(seq),
+            cid: cid_slice,
+        }))
+    }
 }
 
 impl<'a> Iterator for DeframerIter<'a> {
-    type Item = Result<InboundOpaqueMessage<'a>, Error>;
+    type Item = Result<IncomingRecord<'a>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut reader = Reader::init(self.buf);
@@ -64,8 +132,11 @@ impl<'a> Iterator for DeframerIter<'a> {
             }
         };
 
-        let end = HEADER_SIZE + len as usize;
+        if version == ProtocolVersion::DTLSv1_2 || version == ProtocolVersion::DTLSv1_0 {
+            return self.process_dtls_message();
+        };
 
+        let end = HEADER_SIZE + len as usize;
         self.buf.get(HEADER_SIZE..end)?;
 
         // we now have a TLS header and body on the front of `self.buf`.  remove
@@ -74,17 +145,19 @@ impl<'a> Iterator for DeframerIter<'a> {
         self.buf = remainder;
         self.consumed += end;
 
-        Some(Ok(InboundOpaqueMessage::new(
-            typ,
-            version,
-            &mut consumed[HEADER_SIZE..],
-        )))
+        let opaque = InboundOpaqueMessage::new(typ, version, &mut consumed[HEADER_SIZE..]);
+        Some(Ok(IncomingRecord {
+            opaque,
+            epoch: None,
+            seq: None,
+            cid: None,
+        }))
     }
 }
 
-pub fn fuzz_deframer(data: &[u8]) {
+pub fn fuzz_deframer(data: &[u8], cid_len: usize) {
     let mut buf = data.to_vec();
-    let mut iter = DeframerIter::new(&mut buf);
+    let mut iter = DeframerIter::new(&mut buf, cid_len);
 
     for message in iter.by_ref() {
         if message.is_err() {
@@ -106,44 +179,32 @@ mod tests {
 
     #[test]
     fn iterator_empty_before_header_received() {
-        assert!(
-            DeframerIter::new(&mut [])
-                .next()
-                .is_none()
-        );
-        assert!(
-            DeframerIter::new(&mut [0x16])
-                .next()
-                .is_none()
-        );
-        assert!(
-            DeframerIter::new(&mut [0x16, 0x03])
-                .next()
-                .is_none()
-        );
-        assert!(
-            DeframerIter::new(&mut [0x16, 0x03, 0x03])
-                .next()
-                .is_none()
-        );
-        assert!(
-            DeframerIter::new(&mut [0x16, 0x03, 0x03, 0x00])
-                .next()
-                .is_none()
-        );
-        assert!(
-            DeframerIter::new(&mut [0x16, 0x03, 0x03, 0x00, 0x01])
-                .next()
-                .is_none()
-        );
+        assert!(DeframerIter::new(&mut [], 0)
+            .next()
+            .is_none());
+        assert!(DeframerIter::new(&mut [0x16], 0)
+            .next()
+            .is_none());
+        assert!(DeframerIter::new(&mut [0x16, 0x03], 0)
+            .next()
+            .is_none());
+        assert!(DeframerIter::new(&mut [0x16, 0x03, 0x03], 0)
+            .next()
+            .is_none());
+        assert!(DeframerIter::new(&mut [0x16, 0x03, 0x03, 0x00], 0)
+            .next()
+            .is_none());
+        assert!(DeframerIter::new(&mut [0x16, 0x03, 0x03, 0x00, 0x01], 0)
+            .next()
+            .is_none());
     }
 
     #[test]
     fn iterate_one_message() {
         let mut buffer = [0x17, 0x03, 0x03, 0x00, 0x01, 0x00];
-        let mut iter = DeframerIter::new(&mut buffer);
+        let mut iter = DeframerIter::new(&mut buffer, 0);
         assert_eq!(
-            iter.next().unwrap().unwrap().typ,
+            iter.next().unwrap().unwrap().opaque.typ,
             ContentType::ApplicationData
         );
         assert_eq!(iter.bytes_consumed(), 6);
@@ -155,11 +216,14 @@ mod tests {
         let mut buffer = [
             0x16, 0x03, 0x03, 0x00, 0x01, 0x00, 0x17, 0x03, 0x03, 0x00, 0x01, 0x00,
         ];
-        let mut iter = DeframerIter::new(&mut buffer);
-        assert_eq!(iter.next().unwrap().unwrap().typ, ContentType::Handshake);
+        let mut iter = DeframerIter::new(&mut buffer, 0);
+        assert_eq!(
+            iter.next().unwrap().unwrap().opaque.typ,
+            ContentType::Handshake
+        );
         assert_eq!(iter.bytes_consumed(), 6);
         assert_eq!(
-            iter.next().unwrap().unwrap().typ,
+            iter.next().unwrap().unwrap().opaque.typ,
             ContentType::ApplicationData
         );
         assert_eq!(iter.bytes_consumed(), 12);
@@ -169,7 +233,7 @@ mod tests {
     #[test]
     fn iterator_invalid_protocol_version_rejected() {
         let mut buffer = include_bytes!("../../testdata/deframer-invalid-version.bin").to_vec();
-        let mut iter = DeframerIter::new(&mut buffer);
+        let mut iter = DeframerIter::new(&mut buffer, 0);
         assert_eq!(
             iter.next().unwrap().err(),
             Some(Error::InvalidMessage(
@@ -181,7 +245,7 @@ mod tests {
     #[test]
     fn iterator_invalid_content_type_rejected() {
         let mut buffer = include_bytes!("../../testdata/deframer-invalid-contenttype.bin").to_vec();
-        let mut iter = DeframerIter::new(&mut buffer);
+        let mut iter = DeframerIter::new(&mut buffer, 0);
         assert_eq!(
             iter.next().unwrap().err(),
             Some(Error::InvalidMessage(InvalidMessage::InvalidContentType))
@@ -191,7 +255,7 @@ mod tests {
     #[test]
     fn iterator_excess_message_length_rejected() {
         let mut buffer = include_bytes!("../../testdata/deframer-invalid-length.bin").to_vec();
-        let mut iter = DeframerIter::new(&mut buffer);
+        let mut iter = DeframerIter::new(&mut buffer, 0);
         assert_eq!(
             iter.next().unwrap().err(),
             Some(Error::InvalidMessage(InvalidMessage::MessageTooLarge))
@@ -201,7 +265,7 @@ mod tests {
     #[test]
     fn iterator_zero_message_length_rejected() {
         let mut buffer = include_bytes!("../../testdata/deframer-invalid-empty.bin").to_vec();
-        let mut iter = DeframerIter::new(&mut buffer);
+        let mut iter = DeframerIter::new(&mut buffer, 0);
         assert_eq!(
             iter.next().unwrap().err(),
             Some(Error::InvalidMessage(InvalidMessage::InvalidEmptyPayload))
@@ -215,12 +279,12 @@ mod tests {
         buffer.extend(client_hello);
         buffer.extend(client_hello);
         buffer.extend(client_hello);
-        let mut iter = DeframerIter::new(&mut buffer);
+        let mut iter = DeframerIter::new(&mut buffer, 0);
         let mut count = 0;
 
         for message in iter.by_ref() {
             let message = message.unwrap();
-            assert_eq!(ContentType::Handshake, message.typ);
+            assert_eq!(ContentType::Handshake, message.opaque.typ);
             count += 1;
         }
 
@@ -230,9 +294,9 @@ mod tests {
 
     #[test]
     fn exercise_fuzz_deframer() {
-        fuzz_deframer(&[0xff, 0xff, 0xff, 0xff, 0xff]);
+        fuzz_deframer(&[0xff, 0xff, 0xff, 0xff, 0xff], 0);
         for prefix in 0..7 {
-            fuzz_deframer(&[0x16, 0x03, 0x03, 0x00, 0x01, 0xff][..prefix]);
+            fuzz_deframer(&[0x16, 0x03, 0x03, 0x00, 0x01, 0xff][..prefix], 0);
         }
     }
 }
