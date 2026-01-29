@@ -757,7 +757,6 @@ impl KeyScheduleTraffic {
         common: &mut CommonState,
     ) -> Result<(), Error> {
         common.check_aligned_handshake()?;
-        #[cfg(not(feature = "dtls13"))]
         common.send_msg_encrypt(Message::build_key_update_request().into());
         #[cfg(feature = "dtls13")]
         common
@@ -1306,7 +1305,10 @@ fn hkdf_expand_label_inner<F, T>(
 where
     F: FnOnce(&dyn HkdfExpander, &[&[u8]]) -> T,
 {
+    #[cfg(not(feature = "dtls13"))]
     const LABEL_PREFIX: &[u8] = b"tls13 ";
+   #[cfg(feature = "dtls13")] 
+    const LABEL_PREFIX: &[u8] = b"dtls13";
 
     let output_len = u16::to_be_bytes(n as u16);
     let label_len = u8::to_be_bytes((LABEL_PREFIX.len() + label.len()) as u8);

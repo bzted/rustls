@@ -106,7 +106,7 @@ impl DtlsRecordLayer {
             return Ok(None);
         }
 
-        if let Some(ref d) = dec {
+        if let Some(ref _d) = dec {
             self.flight_tracker
                 .record_received(epoch, seq);
         }
@@ -346,12 +346,12 @@ impl DtlsRecordLayer {
         (out, seq)
     }
 
-    pub(crate) fn generate_ack_message(&self) -> AckMessage {
+    pub(crate) fn generate_ack_message(&mut self) -> Option<AckMessage> {
         self.flight_tracker.generate_ack()
     }
 
-    pub(crate) fn poll_retransmit(&mut self) -> Option<&[Vec<u8>]> {
-        self.flight_tracker.poll_timeout()
+    pub(crate) fn retransmit(&mut self) -> Option<&[Vec<u8>]> {
+        self.flight_tracker.timeout()
     }
 
     pub(crate) fn start_flight(&mut self) {

@@ -1,3 +1,5 @@
+use log::debug;
+
 use crate::dtls13::flight::FlightTracker;
 use crate::error::Error;
 use crate::msgs::codec::{Codec, ListLength, Reader, TlsListElement};
@@ -117,5 +119,6 @@ pub(crate) fn generate_ack(received: &HashSet<(u16, u64)>) -> AckMessage {
         }
     }
 
+    debug!("Sending ACK: {:?}", ack);
     ack
 }

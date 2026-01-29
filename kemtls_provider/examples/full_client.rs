@@ -11,10 +11,10 @@ use kemtls_provider::{get_kx_group_by_name, provider, MlKemKey};
 use log::debug;
 use oqs::kem::Kem;
 use rustls::crypto::CryptoProvider;
-use rustls::{ClientConfig, ClientConnection, StreamOwned};
+use rustls::{ClientConfig, ClientConnection};
 
 const BUFFER_SIZE: usize = 4096;
-const TIMEOUT_SECS: u64 = 60;
+const TIMEOUT_SECS: u64 = 1;
 const SERVER_ADDR: &str = "127.0.0.1:8443";
 
 fn get_kem_algorithm(algorithm: &str) -> Result<oqs::kem::Algorithm, String> {
@@ -74,10 +74,25 @@ fn receive_dtls_datagram(
     conn: &mut ClientConnection,
     buffer: &mut [u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let n = socket.recv(buffer)?;
+    /*let n = socket.recv(buffer)?;
     conn.read_tls(&mut &buffer[..n])?;
     conn.process_new_packets()?;
-    Ok(())
+    Ok(())*/
+    match socket.recv(buffer){
+        Ok(n) =>{
+            conn.read_tls(&mut &buffer[..n])?;
+            conn.process_new_packets()?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock =>{
+            conn.process_new_packets()?;
+        }    
+        Err(e) =>{
+            return Err(Box::new(e))
+        } 
+    }
+
+
+    Ok(()) 
 }
 
 fn perform_dtls_handshake(

@@ -1,3 +1,5 @@
+use log::debug;
+
 use crate::dtls13::ack::{generate_ack, AckMessage};
 use crate::dtls13::timer::DtlsTimer;
 use crate::Error;
@@ -12,16 +14,8 @@ pub(crate) struct Flight {
     pub(crate) last_sent: Option<Instant>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum FlightState {
-    Preparing,
-    Waiting,
-    Finished,
-}
-
 pub(crate) struct FlightTracker {
     current: Option<Flight>,
-    state: FlightState,
     timer: DtlsTimer,
     received_records: HashSet<(u16, u64)>, // for ACK generation
 }
@@ -30,7 +24,6 @@ impl FlightTracker {
     pub(crate) fn new() -> Self {
         Self {
             current: None,
-            state: FlightState::Preparing,
             timer: DtlsTimer::new(),
             received_records: HashSet::new(),
         }
@@ -38,16 +31,15 @@ impl FlightTracker {
 
     pub(crate) fn start_flight(&mut self, epoch: u16) {
         self.received_records.clear();
-        self.current = None;
-
-        self.current = Some(Flight {
-            datagrams: Vec::new(),
-            record_numbers: Vec::new(),
-            epoch,
-            first_sent: None,
-            last_sent: None,
-        });
-        self.state = FlightState::Preparing;
+        if self.current.is_none() { 
+            self.current = Some(Flight {
+                datagrams: Vec::new(),
+                record_numbers: Vec::new(),
+                epoch,
+                first_sent: None,
+                last_sent: None,
+            });
+        } 
     }
 
     pub(crate) fn add_record(&mut self, datagrams: Vec<Vec<u8>>, record_nums: Vec<u64>) {
@@ -60,6 +52,7 @@ impl FlightTracker {
                 .record_numbers
                 .push((flight.epoch, seq));
         }
+        debug!("Records added for retransmision: {:?}", flight.record_numbers);
         flight.datagrams.extend(datagrams);
     }
 
@@ -71,7 +64,6 @@ impl FlightTracker {
         let now = Instant::now();
         flight.first_sent.get_or_insert(now);
         flight.last_sent = Some(now);
-        self.state = FlightState::Waiting;
 
         // Start retransmission timer
         self.timer.start();
@@ -79,22 +71,37 @@ impl FlightTracker {
 
     pub(crate) fn process_ack_payload(&mut self, ack_data: &[u8]) -> Result<(), Error> {
         let ack = AckMessage::from_record_data(ack_data)?;
+        debug!("Received ACK: {:?}", ack);
         self.on_ack_ranges(&ack.to_ranges());
         Ok(())
     }
 
     pub(crate) fn record_received(&mut self, epoch: u16, seq: u64) {
+        // We received a record, meaning peer received all our previous messages
+        // clear the retransmission set
+        self.current = None;
+        // Add the received record to de ackable records set
         self.received_records
             .insert((epoch, seq));
+        debug!("Adding received record. Epoch: {:?}, seq: {:?}. Received records: {:?}", epoch, seq, self.received_records);
         self.timer.stop();
+        //self.timer.restart();
     }
 
-    pub(crate) fn generate_ack(&self) -> AckMessage {
-        generate_ack(&self.received_records)
+    pub(crate) fn generate_ack(&mut self) -> Option<AckMessage> {
+        //debug!("Received records: {:?}", self.received_records);
+        if self.received_records.is_empty(){
+            return None
+        } 
+        
+        if !self.timer.ack_timeout(){
+            return None
+        } 
+        Some(generate_ack(&self.received_records))
     }
 
-    pub(crate) fn poll_timeout(&mut self) -> Option<&[Vec<u8>]> {
-        if !self.timer.poll_timeout() {
+    pub(crate) fn timeout(&mut self) -> Option<&[Vec<u8>]> {
+        if !self.timer.timeout() {
             return None;
         }
 
@@ -110,21 +117,29 @@ impl FlightTracker {
             .expect("no current flight");
 
         // Remove acked records from retransmission set
-        flight
-            .record_numbers
-            .retain(|&(rec_epoch, num)| {
-                !ranges
-                    .iter()
-                    .any(|(epoch, start, end)| rec_epoch == *epoch && num >= *start && num <= *end)
+        let mut i = 0;
+        while i < flight.record_numbers.len() {
+            let (rec_epoch, num) = flight.record_numbers[i];
+            
+            let is_acked = ranges.iter().any(|(epoch, start, end)| {
+                rec_epoch == *epoch && num >= *start && num <= *end
             });
 
+            if is_acked {
+                flight.record_numbers.remove(i);
+                flight.datagrams.remove(i); 
+            } else {
+                i += 1;
+            }
+        }
+
+        debug!("Received records after processing peer ACK: {:?}", flight.record_numbers);
         if flight.record_numbers.is_empty() {
             self.finish();
         }
     }
 
     pub(crate) fn finish(&mut self) {
-        self.state = FlightState::Finished;
         self.timer.stop();
         self.current = None;
     }

@@ -3,7 +3,6 @@ use alloc::vec::Vec;
 
 use log::trace;
 use pki_types::CertificateDer;
-use x509_parser::der_parser::rusticata_macros::debug;
 
 use crate::crypto::SupportedKxGroup;
 use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
@@ -567,6 +566,7 @@ impl CommonState {
 
             MessagePayload::Handshake { parsed, encoded } => {
                 self.record_layer.start_flight();
+                debug!("Sending CH or SH");
                 let fragments = match self.fragment_dtls13_handshake_flight(&encoded) {
                     Ok(f) => f,
                     Err(e) => {
@@ -921,9 +921,6 @@ impl CommonState {
         &mut self,
         key_update_request: &KeyUpdateRequest,
     ) -> Result<bool, Error> {
-        if self.protocol == Protocol::Udp {
-            return Ok(false);
-        }
         self.temper_counters
             .received_key_update_request()?;
 

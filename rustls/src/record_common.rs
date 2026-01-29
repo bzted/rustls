@@ -221,10 +221,10 @@ impl AnyRecordLayer {
         }
     }
 
-    pub(crate) fn generate_ack_message(&self) -> AckMessage {
+    pub(crate) fn generate_ack_message(&mut self) -> Option<AckMessage> {
         match self {
-            Self::Tls(_) => panic!(),
-            Self::Dtls(r) => r.as_ref().generate_ack_message(),
+            Self::Tls(_) => None,
+            Self::Dtls(r) => r.as_mut().generate_ack_message(),
         }
     }
 
@@ -242,10 +242,10 @@ impl AnyRecordLayer {
         }
     }
 
-    pub(crate) fn poll_retransmit(&mut self) -> Option<&[Vec<u8>]> {
+    pub(crate) fn retransmit(&mut self) -> Option<&[Vec<u8>]> {
         match self {
             Self::Tls(_) => None,
-            Self::Dtls(r) => r.as_mut().poll_retransmit(),
+            Self::Dtls(r) => r.as_mut().retransmit(),
         }
     }
 }

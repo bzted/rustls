@@ -884,13 +884,35 @@ impl<Data> ConnectionCore<Data> {
         let mut buffer_progress = self.hs_deframer.progress();
 
         loop {
+            if let Some(ack) = self.common_state.record_layer.generate_ack_message() {
+                debug!("Sending ACK with records:{:?}", ack.record_numbers);
+                let mut buf = Vec::new();
+                ack.encode(&mut buf);
+                let ack_msg = crate::msgs::message::OutboundPlainMessage {
+                        typ: ContentType::Ack,
+                        version: ProtocolVersion::DTLSv1_2, // legacy,
+                        payload: buf.as_slice().into(),
+                    };
+                
+                let epoch = self.common_state.record_layer.write_epoch();
+                let (record_bytes, _seq) = if epoch != 0 {
+                        self.common_state.record_layer
+                            .encrypt_fragment(ack_msg)
+                    } else {
+                        self.common_state.record_layer
+                            .write_dtls_plain_record(ack_msg)
+                    };
+                self.common_state.sendable_tls.append(record_bytes);
+
+            } 
+
             if let Some(retransmit) = self
                 .common_state
                 .record_layer
-                .poll_retransmit()
+                .retransmit()
                 .map(|r| r.to_vec())
             {
-                debug!("Timer timed out, retransmiting last flight");
+                debug!("Timer timed out, retransmiting last flight. Retransmitted records: {:?}", retransmit.len());
 
                 for buf in retransmit {
                     self.common_state
@@ -1126,7 +1148,6 @@ impl<Data> ConnectionCore<Data> {
                             version: message.version,
                             payload: complete_msg,
                         };
-
                         buffer_progress.add_discard(processed);
                         return Ok(Some(ProcessedMessage::Owned(full_message)));
                     }

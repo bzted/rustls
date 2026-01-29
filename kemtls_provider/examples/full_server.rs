@@ -7,14 +7,14 @@ use oqs::kem::Kem;
 use rustls::crypto::CryptoProvider;
 use rustls::server::Acceptor;
 use rustls::{ServerConfig, ServerConnection};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
 
 const BUFFER_SIZE: usize = 4096;
 const SERVER_PORT: u16 = 8443;
-const TIMEOUT_SECS: u64 = 60;
+const TIMEOUT_SECS: u64 = 1;
 const HTTP_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\n\
                                 Connection: closed\r\n\
                                 Content-Type: text/html\r\n\
@@ -87,10 +87,10 @@ fn handle_tls_client(
             Ok(Some(accepted)) => break accepted,
             Ok(None) => continue,
             Err((err, mut alert)) => {
-                eprintln!("Error in handshake: {:?}", err);
+                debug!("Error in handshake: {:?}", err);
                 let mut out = Vec::new();
                 if let Err(write_err) = alert.write(&mut out) {
-                    eprintln!("Error writing alert: {:?}", write_err);
+                    debug!("Error writing alert: {:?}", write_err);
                 } else {
                     let _ = stream.write_all(&out);
                 }
@@ -102,10 +102,10 @@ fn handle_tls_client(
     let mut conn = match accepted.into_connection(server_config.into()) {
         Ok(conn) => conn,
         Err((err, mut alert)) => {
-            eprintln!("Error creating connection: {:?}", err);
+            debug!("Error creating connection: {:?}", err);
             let mut out = Vec::new();
             if let Err(write_err) = alert.write(&mut out) {
-                eprintln!("Error writing alert: {:?}", write_err);
+                debug!("Error writing alert: {:?}", write_err);
             } else {
                 let _ = stream.write_all(&out);
             }
@@ -133,11 +133,11 @@ fn run_tls_server(server_config: ServerConfig) -> Result<(), Box<dyn std::error:
         match stream {
             Ok(stream) => {
                 if let Err(e) = handle_tls_client(stream, server_config.clone()) {
-                    eprintln!("Error handling TLS client: {:?}", e);
+                    debug!("Error handling TLS client: {:?}", e);
                 }
             }
             Err(e) => {
-                eprintln!("Error accepting connection: {:?}", e);
+                debug!("Error accepting connection: {:?}", e);
             }
         }
     }
@@ -171,7 +171,13 @@ fn handle_dtls_connection(
     buffer: &mut [u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (accepted, client_addr) = loop {
-        let (len, client_addr) = socket.recv_from(buffer)?;
+        let (len, client_addr) = match socket.recv_from(buffer) {
+            Ok(v) => v,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                return Ok(());
+            }
+            Err(e) => return Err(Box::new(e))
+        }; 
         debug!("Received {} bytes from {}", len, client_addr);
 
         acceptor.read_tls(&mut &buffer[..len])?;
@@ -180,10 +186,10 @@ fn handle_dtls_connection(
             Ok(Some(accepted)) => break (accepted, client_addr),
             Ok(None) => continue,
             Err((err, mut alert)) => {
-                eprintln!("Error in handshake: {:?}", err);
+                debug!("Error in handshake: {:?}", err);
                 let mut out = Vec::new();
                 if let Err(write_err) = alert.write(&mut out) {
-                    eprintln!("Error writing alert: {:?}", write_err);
+                    debug!("Error writing alert: {:?}", write_err);
                 } else {
                     let _ = socket.send_to(&out, client_addr);
                 }
@@ -195,10 +201,10 @@ fn handle_dtls_connection(
     let mut conn = match accepted.into_connection(server_config.into()) {
         Ok(conn) => conn,
         Err((err, mut alert)) => {
-            eprintln!("Error creating connection: {:?}", err);
+            debug!("Error creating connection: {:?}", err);
             let mut out = Vec::new();
             if let Err(write_err) = alert.write(&mut out) {
-                eprintln!("Error writing alert: {:?}", write_err);
+                debug!("Error writing alert: {:?}", write_err);
             } else {
                 let _ = socket.send_to(&out, client_addr);
             }
@@ -216,7 +222,7 @@ fn handle_dtls_connection(
             }
         }
 
-        let (len, addr) = socket.recv_from(buffer)?;
+        /*let (len, addr) = socket.recv_from(buffer)?;
         if addr != client_addr {
             debug!("Ignoring datagram from different address");
             continue;
@@ -224,7 +230,23 @@ fn handle_dtls_connection(
 
         debug!("Received {} bytes during handshake", len);
         conn.read_tls(&mut &buffer[..len])?;
-        conn.process_new_packets()?;
+        conn.process_new_packets()?;*/
+        match socket.recv_from(buffer){
+            Ok((len, addr)) =>{
+                if addr != client_addr {
+                    debug!("Addres missmatch");
+                    continue;
+                } 
+            conn.read_tls(&mut &buffer[..len])?;
+            conn.process_new_packets()?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock =>{
+            conn.process_new_packets()?;
+        }    
+        Err(e) =>{
+            return Err(Box::new(e))
+        } 
+        } 
     }
 
     debug!("Handshake completed!");
@@ -250,7 +272,7 @@ fn run_dtls_server(server_config: ServerConfig) -> Result<(), Box<dyn std::error
         if let Err(e) =
             handle_dtls_connection(&socket, acceptor, server_config.clone(), &mut buffer)
         {
-            eprintln!("Error handling DTLS connection: {:?}", e);
+            debug!("Error handling DTLS connection: {:?}", e);
             continue;
         }
     }
@@ -268,19 +290,19 @@ fn parse_arguments() -> (Option<String>, String) {
             "-group" => {
                 group = args.next();
                 if group.is_none() {
-                    eprintln!("Error: -group requires a group name");
+                    debug!("Error: -group requires a group name");
                     std::process::exit(1);
                 }
             }
             "-authkem" => {
                 authkem = args.next();
                 if authkem.is_none() {
-                    eprintln!("Error: -authkem requires an algorithm name");
+                    debug!("Error: -authkem requires an algorithm name");
                     std::process::exit(1);
                 }
             }
             _ => {
-                eprintln!("Error: Unknown argument '{}'", arg);
+                debug!("Error: Unknown argument '{}'", arg);
                 std::process::exit(1);
             }
         }
@@ -308,7 +330,7 @@ fn main() {
             alg
         }
         Err(e) => {
-            eprintln!("Error with authkem algorithm: {}", e);
+            debug!("Error with authkem algorithm: {}", e);
             std::process::exit(1);
         }
     };
@@ -330,7 +352,7 @@ fn main() {
     let server_config = match create_server_config(kemalg, crypto_provider) {
         Ok(config) => config,
         Err(e) => {
-            eprintln!("Failed to create server config: {:?}", e);
+            debug!("Failed to create server config: {:?}", e);
             std::process::exit(1);
         }
     };
@@ -342,7 +364,7 @@ fn main() {
     };
 
     if let Err(e) = result {
-        eprintln!("Server error: {:?}", e);
+        debug!("Server error: {:?}", e);
         std::process::exit(1);
     }
 }
