@@ -1714,7 +1714,9 @@ fn emit_end_of_early_data_tls13(transcript: &mut HandshakeHash, common: &mut Com
             payload: HandshakePayload::EndOfEarlyData,
         }),
     };
-    transcript.add_message(&m);
+    if !common.is_dtls() {
+        transcript.add_message(&m);
+    } 
     common.send_msg(m, true);
 }
 
