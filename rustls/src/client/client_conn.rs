@@ -289,6 +289,10 @@ pub struct ClientConfig {
 
     /// AuthKem Psk early auth. false by default
     pub early_auth: bool,
+
+    /// Connection Id
+    #[cfg(features = "dtls13")]   
+    pub cid: usize,
 }
 
 impl ClientConfig {

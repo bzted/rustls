@@ -193,6 +193,8 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             ech_mode: self.state.client_ech_mode,
             authkem_psk_key: self.state.authkem_psk_key,
             early_auth: false,
+            #[cfg(features = "dtls13")]   
+            cid: 0
         }
     }
 }
