@@ -624,6 +624,15 @@ pub(crate) struct KeyScheduleClientBeforeFinished {
 impl KeyScheduleClientBeforeFinished {
     pub(crate) fn into_traffic(self, common: &mut CommonState) -> KeyScheduleTraffic {
         debug_assert_eq!(common.side, Side::Client);
+        #[cfg(feature = "dtls13")]
+                {
+                    common
+                        .record_layer
+                        .advance_write_epoch();
+                    debug_assert_eq!(common.record_layer.write_epoch(), 3);
+                    common.record_layer.advance_read_epoch();
+                    debug_assert_eq!(common.record_layer.read_epoch(), 3);
+                }
         let (client_secret, server_secret) = (
             &self
                 .traffic
