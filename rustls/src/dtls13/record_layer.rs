@@ -265,14 +265,6 @@ impl DtlsRecordLayer {
         self.record.encrypted_len(payload_len)
     }
 
-    pub(crate) fn inner(&self) -> &RecordLayer {
-        &self.record
-    }
-
-    pub(crate) fn inner_mut(&mut self) -> &mut RecordLayer {
-        &mut self.record
-    }
-
     pub(crate) fn write_dtls_record(&mut self, plain: OutboundPlainMessage<'_>) -> (Vec<u8>, u64) {
         let (encrypted, epoch, seq, cid) = self.encrypt_outgoing(plain);
 
@@ -313,10 +305,6 @@ impl DtlsRecordLayer {
 
         let seq = self.plain_record_seq;
         self.plain_record_seq = self.plain_record_seq.wrapping_add(1);
-        let cid = self
-            .write_cid
-            .as_ref()
-            .map(|c| c.cid.as_slice());
 
         let payload = &plain.payload.to_vec();
 
@@ -327,10 +315,6 @@ impl DtlsRecordLayer {
 
         let seq_bytes = seq.to_be_bytes();
         out.extend_from_slice(&seq_bytes[2..]);
-
-        if let Some(c) = cid {
-            out.extend_from_slice(c);
-        }
 
         (payload.len() as u16).encode(&mut out);
         out.extend_from_slice(payload);
@@ -380,6 +364,16 @@ impl ConnectionId {
             ));
         }
         Ok(Self { cid })
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.cid
+    }
+}
+
+impl From<&ConnectionId> for ConnectionId {
+    fn from(cid: &ConnectionId) -> Self {
+        ConnectionId { cid: cid.cid.clone() }
     }
 }
 

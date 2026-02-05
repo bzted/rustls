@@ -884,7 +884,7 @@ impl<Data> ConnectionCore<Data> {
         let mut buffer_progress = self.hs_deframer.progress();
 
         loop {
-            if let Some(ack) = self.common_state.record_layer.generate_ack_message() {
+            /*if let Some(ack) = self.common_state.record_layer.generate_ack_message() {
                 debug!("Sending ACK with records:{:?}", ack.record_numbers);
                 let mut buf = Vec::new();
                 ack.encode(&mut buf);
@@ -904,7 +904,7 @@ impl<Data> ConnectionCore<Data> {
                     };
                 self.common_state.sendable_tls.append(record_bytes);
 
-            } 
+            }*/
 
             if let Some(retransmit) = self
                 .common_state
@@ -1022,6 +1022,7 @@ impl<Data> ConnectionCore<Data> {
                 .read_cid_len();
         }
         let locator = Locator::new(buffer);
+        debug!("CID length: {:?}", cid_len);
 
         loop {
             trace!("Buffer length: {:?}", buffer.len(),);

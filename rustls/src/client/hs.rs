@@ -21,6 +21,7 @@ use crate::client::{tls13, ClientConfig, EchMode, EchStatus};
 use crate::common_state::{CommonState, HandshakeKind, KxState, State};
 use crate::conn::ConnectionRandoms;
 use crate::crypto::{ActiveKeyExchange, KeyExchangeAlgorithm};
+use crate::dtls13::record_layer::ConnectionId;
 use crate::enums::{AlertDescription, CipherSuite, ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHashBuffer;
@@ -249,6 +250,7 @@ fn emit_client_hello_for_retry(
     let support_tls12 = config.supports_version(ProtocolVersion::TLSv1_2) && !forbids_tls12;
     let support_tls13 = config.supports_version(ProtocolVersion::TLSv1_3);
     let support_dtls13 = config.supports_version(ProtocolVersion::DTLSv1_3);
+    let is_dtls = matches!(cx.common.protocol, crate::common_state::Protocol::Udp);
 
     let mut supported_versions = Vec::new();
     if support_tls13 {
@@ -449,6 +451,14 @@ fn emit_client_hello_for_retry(
             }
         }
     }
+
+    if is_dtls {
+        if let Some(offered_cid) = config.cid.as_ref() {
+            let cid = ConnectionId::from(offered_cid);
+            exts.push(ClientExtension::ConnectionId(cid.clone()));
+            cx.common.record_layer.set_read_cid(cid);
+        }
+    }
     // Do we have a SessionID or ticket cached for this host?
     let tls13_session = prepare_resumption(&input.resuming, &mut exts, suite, cx, config);
 
@@ -485,7 +495,6 @@ fn emit_client_hello_for_retry(
     // We don't do renegotiation at all, in fact.
     cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
 
-    let is_dtls = matches!(cx.common.protocol, crate::common_state::Protocol::Udp);
     let client_version = if is_dtls {
         ProtocolVersion::DTLSv1_2
     } else {
@@ -577,7 +586,7 @@ fn emit_client_hello_for_retry(
                         .provider
                         .cipher_suites
                         .iter()
-                        .find(|cs| (cs.version() == &TLS13))
+                        .find(|cs| cs.version() == &TLS13)
                         .copied()
                 })
                 .expect("no TLS 1.3 cipher suite available");

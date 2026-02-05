@@ -15,6 +15,7 @@ use crate::common_state::{
 };
 use crate::conn::ConnectionRandoms;
 use crate::crypto::{ActiveKeyExchange, SharedSecret};
+use crate::dtls13::record_layer::ConnectionId;
 use crate::enums::{
     AlertDescription, ContentType, HandshakeType, ProtocolVersion, SignatureScheme,
 };
@@ -162,6 +163,23 @@ pub(super) fn handle_server_hello(
 
     if server_hello.early_auth() {
         cx.data.early_auth = true;
+    }
+
+    match server_hello.get_connection_id() {
+        Some(cid) => {
+            // If the cid extension length is 0, the server will send
+            // with the offered CID but does not wish the the client to include a CID when sending.
+            if !cid.as_bytes().is_empty() {
+                // If the server sends a CID extension, we expect to receive a CID in its records,
+                // and we set the CID for the record layer here.
+                cx.common.record_layer.set_write_cid(ConnectionId::from(cid));
+            }
+        }
+        None => {
+            // If the server doesn't send a CID extension, we won't 
+            // expect to receive one in its records
+            cx.common.record_layer.clear_read_cid();
+        }
     }
 
     cx.common.kx_state.complete();

@@ -354,13 +354,15 @@ pub(crate) fn read_dtls_message_header(
     };
 
     let len = u16::read(r).map_err(|_| MessageError::TooShortForHeader)?;
-
+    debug!("Len: {len}");
+    
     if typ != ContentType::ApplicationData && len == 0 {
         return Err(MessageError::InvalidEmptyPayload);
     }
 
     // Reject oversize messages
     if len >= MAX_PAYLOAD {
+        debug!("peta aqui");
         return Err(MessageError::MessageTooLarge);
     }
 

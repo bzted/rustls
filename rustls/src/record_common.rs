@@ -1,6 +1,6 @@
 use crate::{
     crypto::cipher::{MessageDecrypter, MessageEncrypter},
-    dtls13::{ack::AckMessage, record_layer::DtlsRecordLayer},
+    dtls13::{ack::AckMessage, record_layer::{ConnectionId, DtlsRecordLayer}},
     error::Error,
     record_layer::{PreEncryptAction, RecordLayer},
 };
@@ -246,6 +246,34 @@ impl AnyRecordLayer {
         match self {
             Self::Tls(_) => None,
             Self::Dtls(r) => r.as_mut().retransmit(),
+        }
+    }
+
+    pub(crate) fn set_write_cid(&mut self, cid: ConnectionId) {
+        match self {
+            Self::Tls(_) => (),
+            Self::Dtls(r) => r.as_mut().set_write_cid(cid),
+        }
+    }
+
+    pub(crate) fn set_read_cid(&mut self, cid: ConnectionId) {
+        match self {
+            Self::Tls(_) => (),
+            Self::Dtls(r) => r.as_mut().set_read_cid(cid),
+        }
+    }
+
+    pub(crate) fn clear_write_cid(&mut self) {
+        match self {
+            Self::Tls(_) => (),
+            Self::Dtls(r) => r.as_mut().clear_write_cid(),
+        }
+    }
+
+    pub(crate) fn clear_read_cid(&mut self) {
+        match self {
+            Self::Tls(_) => (),
+            Self::Dtls(r) => r.as_mut().clear_read_cid(),
         }
     }
 }

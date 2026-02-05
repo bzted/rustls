@@ -13,7 +13,7 @@ use crate::client::{EchMode, EchStatus};
 use crate::common_state::{CommonState, Protocol, Side};
 use crate::conn::{ConnectionCore, UnbufferedConnectionCommon};
 use crate::crypto::{CryptoProvider, SupportedKxGroup};
-use crate::dtls13::record_layer::DtlsRecordLayer;
+use crate::dtls13::record_layer::{ConnectionId, DtlsRecordLayer};
 use crate::enums::{CipherSuite, ProtocolVersion, SignatureScheme};
 use crate::error::Error;
 use crate::log::trace;
@@ -291,8 +291,8 @@ pub struct ClientConfig {
     pub early_auth: bool,
 
     /// Connection Id
-    #[cfg(features = "dtls13")]   
-    pub cid: usize,
+    //#[cfg(features = "dtls13")]   
+    pub cid: Option<ConnectionId>,
 }
 
 impl ClientConfig {
@@ -453,6 +453,11 @@ impl ClientConfig {
         self.time_provider
             .current_time()
             .ok_or(Error::FailedToGetCurrentTime)
+    }
+
+    pub fn set_cid(&mut self, cid: &[u8]) -> Result<(), Error> {
+        self.cid = Some(ConnectionId::new(cid.to_vec())?);
+        Ok(())
     }
 }
 

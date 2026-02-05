@@ -4,7 +4,7 @@ use core::fmt;
 use core::fmt::{Debug, Formatter};
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
-use log::debug;
+
 #[cfg(feature = "std")]
 use std::io;
 
@@ -19,7 +19,8 @@ use crate::conn::{ConnectionCommon, ConnectionCore, UnbufferedConnectionCommon};
 #[cfg(doc)]
 use crate::crypto;
 use crate::crypto::CryptoProvider;
-use crate::dtls13::record_layer::DtlsRecordLayer;
+
+use crate::dtls13::record_layer::ConnectionId;
 use crate::enums::{CipherSuite, ProtocolVersion, SignatureScheme};
 use crate::error::Error;
 use crate::log::trace;
@@ -424,6 +425,9 @@ pub struct ServerConfig {
     ///
     /// [RFC8779]: https://datatracker.ietf.org/doc/rfc8879/
     pub cert_decompressors: Vec<&'static dyn compress::CertDecompressor>,
+
+    //#[cfg(feature = "dtls13")]
+    pub cid: Option<ConnectionId>,
 }
 
 impl ServerConfig {
@@ -556,6 +560,11 @@ impl ServerConfig {
         self.time_provider
             .current_time()
             .ok_or(Error::FailedToGetCurrentTime)
+    }
+
+    pub fn set_cid(&mut self, cid: &[u8]) -> Result<(), Error> {
+        self.cid = Some(ConnectionId::new(cid.to_vec())?);
+        Ok(())
     }
 }
 

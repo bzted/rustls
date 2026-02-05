@@ -44,6 +44,7 @@ mod client_hello {
     use super::*;
     use crate::compress::CertCompressor;
     use crate::crypto::SupportedKxGroup;
+    use crate::dtls13::record_layer::ConnectionId;
     use crate::enums::SignatureScheme;
     use crate::msgs::base::{Payload, PayloadU8};
     use crate::msgs::ccs::ChangeCipherSpecPayload;
@@ -346,6 +347,8 @@ mod client_hello {
                 }
             }
 
+            let cid = client_hello.get_connection_id();
+
             let doing_early_auth = authkem_psk_ss.is_some() && client_hello.early_auth();
             let full_handshake = resumedata.is_none() && authkem_psk_ss.is_none();
             self.transcript.add_message(chm);
@@ -362,6 +365,7 @@ mod client_hello {
                     .map(|x| &x.master_secret.0[..]),
                 authkem_psk_ss.clone(),
                 doing_early_auth,
+                cid,
                 &self.config,
             )?;
             if !self.done_retry {
@@ -544,6 +548,7 @@ mod client_hello {
         resuming_psk: Option<&[u8]>,
         authkem_psk_ss: Option<Vec<u8>>,
         doing_early_auth: bool,
+        cid: Option<&ConnectionId>,
         config: &ServerConfig,
     ) -> Result<KeyScheduleHandshake, Error> {
         let mut extensions = Vec::new();
@@ -563,16 +568,20 @@ mod client_hello {
             ckx.group,
             ckx.pub_key,
         )));
-        /*extensions.push(ServerExtension::SupportedVersions(
-            ProtocolVersion::DTLSv1_3,
-        ));
-        extensions.push(ServerExtension::SupportedVersions(ProtocolVersion::TLSv1_3));*/
 
         if authkem_psk_ss.is_some() {
             extensions.push(ServerExtension::StoredAuthKey);
 
             if doing_early_auth {
                 extensions.push(ServerExtension::EarlyAuth);
+            }
+        }
+
+        if let Some(cid) = cid {
+            cx.common.record_layer.set_write_cid(ConnectionId::from(cid));
+            if let Some(cid) = config.cid.as_ref() {
+                extensions.push(ServerExtension::ConnectionId(ConnectionId::from(cid)));
+                cx.common.record_layer.set_read_cid(ConnectionId::from(cid));
             }
         }
 
