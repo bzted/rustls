@@ -158,14 +158,6 @@ impl DtlsRecordLayer {
         self.replay_window.reset();
     }
 
-    pub(crate) fn has_read_cid(&self) -> bool {
-        self.read_cid.is_some()
-    }
-
-    pub(crate) fn has_write_cid(&self) -> bool {
-        self.write_cid.is_some()
-    }
-
     pub(crate) fn read_cid_length(&self) -> usize {
         self.read_cid
             .as_ref()
