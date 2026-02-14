@@ -1022,10 +1022,8 @@ impl<Data> ConnectionCore<Data> {
                 .read_cid_len();
         }
         let locator = Locator::new(buffer);
-        debug!("CID length: {:?}", cid_len);
 
         loop {
-            trace!("Buffer length: {:?}", buffer.len(),);
             let mut iter = DeframerIter::new(&mut buffer[buffer_progress.processed()..], cid_len);
 
             let (message, processed) = loop {

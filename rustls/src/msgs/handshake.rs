@@ -5,7 +5,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Deref;
 use core::{fmt, iter};
-use log::trace;
+use log::{debug, trace};
 
 use pki_types::{CertificateDer, DnsName};
 
@@ -605,8 +605,8 @@ pub enum ClientExtension {
     EncryptedClientHelloOuterExtensions(Vec<ExtensionType>),
     AuthorityNames(Vec<DistinguishedName>),
     StoredAuthKey(StoredAuthKey), // Added extensions
-    EarlyAuth(EarlyAuth),         // Added extensions
     ConnectionId(ConnectionId),
+    EarlyAuth(EarlyAuth),         // Added extensions
     Unknown(UnknownExtension),
 }
 
@@ -638,8 +638,8 @@ impl ClientExtension {
             }
             Self::AuthorityNames(_) => ExtensionType::CertificateAuthorities,
             Self::StoredAuthKey(_) => ExtensionType::StoredAuthKey,
-            Self::EarlyAuth(_) => ExtensionType::EarlyAuth,
             Self::ConnectionId(_) => ExtensionType::ConnectionId,
+            Self::EarlyAuth(_) => ExtensionType::EarlyAuth,
             Self::Unknown(r) => r.typ,
         }
     }
@@ -676,8 +676,8 @@ impl Codec<'_> for ClientExtension {
             Self::EncryptedClientHelloOuterExtensions(r) => r.encode(nested.buf),
             Self::AuthorityNames(r) => r.encode(nested.buf),
             Self::StoredAuthKey(r) => r.encode(nested.buf),
-            Self::EarlyAuth(_) => {} // EarlyAuth extension is empty
             Self::ConnectionId(r) => r.encode(nested.buf),
+            Self::EarlyAuth(_) => {} // EarlyAuth extension is empty
             Self::Unknown(r) => r.encode(nested.buf),
         }
     }
@@ -728,6 +728,7 @@ impl Codec<'_> for ClientExtension {
             }
             ExtensionType::CertificateAuthorities => Self::AuthorityNames(Vec::read(&mut sub)?),
             ExtensionType::StoredAuthKey => Self::StoredAuthKey(StoredAuthKey::read(&mut sub)?),
+            ExtensionType::ConnectionId => Self::ConnectionId(ConnectionId::read(&mut sub)?),
             ExtensionType::EarlyAuth if !sub.any_left() => Self::EarlyAuth(EarlyAuth {}),
             _ => Self::Unknown(UnknownExtension::read(typ, &mut sub)),
         };
@@ -789,8 +790,8 @@ pub enum ServerExtension {
     EarlyData,
     EncryptedClientHello(ServerEncryptedClientHello),
     StoredAuthKey,
-    EarlyAuth,
     ConnectionId(ConnectionId),
+    EarlyAuth,
     Unknown(UnknownExtension),
 }
 
@@ -814,8 +815,8 @@ impl ServerExtension {
             Self::EarlyData => ExtensionType::EarlyData,
             Self::EncryptedClientHello(_) => ExtensionType::EncryptedClientHello,
             Self::StoredAuthKey => ExtensionType::StoredAuthKey,
-            Self::EarlyAuth => ExtensionType::EarlyAuth,
             Self::ConnectionId(_) => ExtensionType::ConnectionId,
+            Self::EarlyAuth => ExtensionType::EarlyAuth,
             Self::Unknown(r) => r.typ,
         }
     }
@@ -845,8 +846,8 @@ impl Codec<'_> for ServerExtension {
             }
             Self::EncryptedClientHello(r) => r.encode(nested.buf),
             Self::StoredAuthKey => 1u8.encode(nested.buf), // We send a '1'
-            Self::EarlyAuth => {}                          // EarlyAuth extension is empty
             Self::ConnectionId(r) => r.encode(nested.buf),
+            Self::EarlyAuth => {}                          // EarlyAuth extension is empty
             Self::Unknown(r) => r.encode(nested.buf),
         }
     }
@@ -890,6 +891,7 @@ impl Codec<'_> for ServerExtension {
                 }
                 Self::StoredAuthKey
             }
+            ExtensionType::ConnectionId => Self::ConnectionId(ConnectionId::read(&mut sub)?),
             ExtensionType::EarlyAuth if !sub.any_left() => Self::EarlyAuth,
             _ => Self::Unknown(UnknownExtension::read(typ, &mut sub)),
         };
@@ -1530,7 +1532,7 @@ impl ServerHelloPayload {
         self.find_extension(ExtensionType::EarlyAuth)
             .is_some()
     }
-
+    
     pub(crate) fn ecpoints_extension(&self) -> Option<&[ECPointFormat]> {
         let ext = self.find_extension(ExtensionType::ECPointFormats)?;
         match ext {

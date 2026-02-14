@@ -51,7 +51,6 @@ impl DtlsRecordLayer {
     /// Decrypt a DTLS message with epoch verification and anti-replay protection.
     /// 'encr' is a decoded message allegedly received from the peer.
     /// 'epoch' and 'seq' should be extracted from the DTLS record header.
-    /// After verifying them, we delegate to the TLS record layer.
     pub(crate) fn decrypt_incoming<'a>(
         &mut self,
         encr: InboundOpaqueMessage<'a>,
@@ -59,7 +58,7 @@ impl DtlsRecordLayer {
         seq: u64,
         cid: Option<&[u8]>,
     ) -> Result<Option<Decrypted<'a>>, Error> {
-        if epoch != self.read_epoch {
+        if (self.read_epoch & 0x0003) != (epoch & 0x0003) {
             debug!(
                 "Dropping message with wrong epoch: expected {}, got {}",
                 self.read_epoch, epoch
@@ -88,7 +87,7 @@ impl DtlsRecordLayer {
             return Ok(None);
         }
 
-        let dec = self.record.decrypt_incoming(encr)?;
+        let dec = self.record.decrypt_incoming_with_seq(encr, seq)?;
 
         if let Some(ref d) = dec {
             if d.plaintext.typ == ContentType::Ack {
@@ -108,7 +107,7 @@ impl DtlsRecordLayer {
 
         if let Some(ref _d) = dec {
             self.flight_tracker
-                .record_received(epoch, seq);
+                .record_received(self.read_epoch, seq);
         }
 
         Ok(dec)
@@ -267,32 +266,48 @@ impl DtlsRecordLayer {
 
     pub(crate) fn write_dtls_record(&mut self, plain: OutboundPlainMessage<'_>) -> (Vec<u8>, u64) {
         let (encrypted, epoch, seq, cid) = self.encrypt_outgoing(plain);
+        let payload = encrypted.payload.as_ref();
 
-        let mut output = Vec::new();
+        let c = cid.is_some();
+        let s = true; // 16-bit seq
+        let l = true; // length present
+        let ee = (epoch & 0x0003) as u8;
 
-        encrypted.typ.encode(&mut output);
+        let first = 0b0010_0000
+            | ((c as u8) << 4)
+            | ((s as u8) << 3)
+            | ((l as u8) << 2)
+            | ee;
 
-        ProtocolVersion::DTLSv1_2.encode(&mut output);
+        let mut out = Vec::with_capacity(
+            1
+            + cid.map(|c| c.len()).unwrap_or(0)
+            + 2  // seq16
+            + 2  // length
+            + payload.len(),
+        );
 
-        epoch.encode(&mut output);
+        out.push(first);
 
-        let seq_bytes = seq.to_be_bytes();
-        output.extend_from_slice(&seq_bytes[2..8]);
-
-        if let Some(cid_bytes) = cid {
-            output.extend_from_slice(cid_bytes);
+        if let Some(cid) = cid {
+            out.extend_from_slice(cid);
         }
 
-        let payload = encrypted.payload.as_ref();
-        (payload.len() as u16).encode(&mut output);
+        // mask missing
+        let seq16 = (seq as u16).to_be_bytes();
+        out.extend_from_slice(&seq16);
 
-        output.extend_from_slice(payload);
+        let len_u16 = payload.len() as u16;
+        out.extend_from_slice(&len_u16.to_be_bytes());
+
+        out.extend_from_slice(payload);
+
         debug!(
             "Writing encrypted message. Epoch: {:?}, seq: {:?}",
             epoch, seq
         );
 
-        (output, seq)
+        (out, seq)
     }
 
     pub(crate) fn write_dtls_plain_record(

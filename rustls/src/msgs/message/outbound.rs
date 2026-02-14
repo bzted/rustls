@@ -317,10 +317,9 @@ pub(crate) fn read_opaque_message_header(
     Ok((typ, version, len))
 }
 
-pub(crate) fn read_dtls_message_header(
+pub(crate) fn read_dtls_plaintext_header(
     r: &mut Reader<'_>,
-    cid_len: usize,
-) -> Result<(ContentType, ProtocolVersion, u16, u64, bool, u16), MessageError> {
+) -> Result<(ContentType, ProtocolVersion, u16, u64, u16), MessageError> {
     let typ = ContentType::read(r).map_err(|_| MessageError::TooShortForHeader)?;
     if let ContentType::Unknown(_) = typ {
         return Err(MessageError::InvalidContentType);
@@ -345,14 +344,6 @@ pub(crate) fn read_dtls_message_header(
         seq_bytes[5],
     ]);
 
-    let cid = if cid_len > 0 {
-        r.take(cid_len)
-            .ok_or(MessageError::TooShortForHeader)?;
-        true
-    } else {
-        false
-    };
-
     let len = u16::read(r).map_err(|_| MessageError::TooShortForHeader)?;
     debug!("Len: {len}");
     
@@ -366,8 +357,67 @@ pub(crate) fn read_dtls_message_header(
         return Err(MessageError::MessageTooLarge);
     }
 
-    Ok((typ, version, epoch, seq, cid, len))
+    Ok((typ, version, epoch, seq, len))
 }
+
+pub(crate)  fn read_dtls13_unified_header<'b>(
+    buf: &'b [u8],
+    cid_len: usize,
+) -> Result<(bool, u16, u64, usize, usize, Option<(usize, usize)>), MessageError> {
+    let first = *buf.get(0).ok_or(MessageError::TooShortForHeader)?;
+
+    if (first & 0b1110_0000) != 0b0010_0000 {
+        return Err(MessageError::InvalidContentType);
+    }
+
+    let c = (first & 0x10) != 0;
+    let s = (first & 0x08) != 0;
+    let l = (first & 0x04) != 0;
+    let ee = (first & 0x03) as u16;
+
+    let mut off = 1usize;
+
+    let cid_range = if c {
+        if cid_len == 0 {
+            return Err(MessageError::TooShortForHeader);
+        }
+        let start = off;
+        let end = off + cid_len;
+        buf.get(start..end).ok_or(MessageError::TooShortForHeader)?;
+        off = end;
+        Some((start, end))
+    } else {
+        None
+    };
+
+    // Seq 8-bit if S=0, 16-bit if S=1
+    let seq = if s {
+        let b = buf.get(off..off + 2).ok_or(MessageError::TooShortForHeader)?;
+        off += 2;
+        u16::from_be_bytes([b[0], b[1]]) as u64
+    } else {
+        let b = *buf.get(off).ok_or(MessageError::TooShortForHeader)?;
+        off += 1;
+        b as u64
+    };
+
+    // If L=1, else record runs to end of datagram
+    let len = if l {
+        let b = buf.get(off..off + 2).ok_or(MessageError::TooShortForHeader)?;
+        off += 2;
+        u16::from_be_bytes([b[0], b[1]]) as usize
+    } else {
+        // length = rest of datagram after header
+        buf.len().saturating_sub(off)
+    };
+
+    if len as u16 >= MAX_PAYLOAD {
+        return Err(MessageError::MessageTooLarge);
+    }
+
+    Ok((c, ee, seq, len, off, cid_range))
+}
+
 
 #[cfg(test)]
 mod tests {

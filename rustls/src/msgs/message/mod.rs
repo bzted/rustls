@@ -16,7 +16,8 @@ pub use inbound::{
 mod outbound;
 use alloc::vec::Vec;
 
-pub(crate) use outbound::read_dtls_message_header;
+pub(crate) use outbound::read_dtls13_unified_header;
+pub(crate) use outbound::read_dtls_plaintext_header;
 pub(crate) use outbound::read_opaque_message_header;
 pub use outbound::{OutboundChunks, OutboundOpaqueMessage, OutboundPlainMessage, PrefixedPayload};
 
@@ -197,6 +198,9 @@ impl Message<'_> {
 
     pub fn build_key_update_request() -> Self {
         Self {
+            #[cfg(feature = "dtls13")]
+            version: ProtocolVersion::DTLSv1_3,
+            #[cfg(not(feature = "dtls13"))]
             version: ProtocolVersion::TLSv1_3,
             payload: MessagePayload::handshake(HandshakeMessagePayload {
                 typ: HandshakeType::KeyUpdate,

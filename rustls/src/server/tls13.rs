@@ -1313,7 +1313,7 @@ impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
                 send_tickets: self.send_tickets,
             }))
         } else {
-            let key_schedule = auth_handhsake_key_schedule.into_main_secret(None, cx.common);
+            let key_schedule = auth_handhsake_key_schedule.into_main_secret(None);
             debug!("SERVER GOING INTO EXPECT CLIENT FINISHED");
             Ok(Box::new(ExpectClientFinished {
                 config: self.config,
@@ -1373,7 +1373,7 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
             debug!("CLIENT AUTH NOT MANDATORY, CONTINUING W/O CLIENT AUTH");
             let key_schedule = self
                 .key_schedule
-                .into_main_secret(None, cx.common);
+                .into_main_secret(None);
 
             return Ok(Box::new(ExpectClientFinished {
                 config: self.config,
@@ -1411,7 +1411,7 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
 
         let key_schedule = self
             .key_schedule
-            .into_main_secret(Some(&client_ss), cx.common);
+            .into_main_secret(Some(&client_ss));
 
         cx.common.peer_certificates = Some(owned_chain.clone());
 

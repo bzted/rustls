@@ -456,7 +456,6 @@ fn emit_client_hello_for_retry(
         if let Some(offered_cid) = config.cid.as_ref() {
             let cid = ConnectionId::from(offered_cid);
             exts.push(ClientExtension::ConnectionId(cid.clone()));
-            cx.common.record_layer.set_read_cid(cid);
         }
     }
     // Do we have a SessionID or ticket cached for this host?

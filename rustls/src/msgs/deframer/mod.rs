@@ -5,8 +5,7 @@ use log::debug;
 use crate::error::{Error, InvalidMessage};
 use crate::msgs::codec::Reader;
 use crate::msgs::message::{
-    read_dtls_message_header, read_opaque_message_header, InboundOpaqueMessage, MessageError,
-    DTLS_HEADER_SIZE, HEADER_SIZE,
+    DTLS_HEADER_SIZE, HEADER_SIZE, InboundOpaqueMessage, MessageError, read_dtls_plaintext_header, read_dtls13_unified_header, read_opaque_message_header
 };
 use crate::record_common::IncomingRecord;
 use crate::ProtocolVersion;
@@ -51,11 +50,56 @@ impl<'a> DeframerIter<'a> {
         self.consumed
     }
 
-    fn process_dtls_message(&mut self) -> Option<Result<IncomingRecord<'a>, Error>> {
-        debug!("Processing DTLS message");
-        let (typ, version, epoch, seq, cid, len) = {
+    fn process_dtls13_ciphertext(&mut self) -> Option<Result<IncomingRecord<'a>, Error>> {
+        let (has_cid, ee, seq, len, header_len, cid_range) = match read_dtls13_unified_header(self.buf, self.cid_len) {
+            Ok(v) => v,
+            Err(err) => {
+                let err = match err {
+                    MessageError::TooShortForHeader | MessageError::TooShortForLength => return None,
+                    MessageError::InvalidEmptyPayload => InvalidMessage::InvalidEmptyPayload,
+                    MessageError::MessageTooLarge => InvalidMessage::MessageTooLarge,
+                    MessageError::InvalidContentType => InvalidMessage::InvalidContentType,
+                    MessageError::UnknownProtocolVersion => InvalidMessage::UnknownProtocolVersion,
+                };
+                return Some(Err(err.into()));
+            }
+        };
+
+        let end = header_len + len;
+        self.buf.get(header_len..end)?; 
+
+        let (consumed, remainder) = mem::take(&mut self.buf).split_at_mut(end);
+        self.buf = remainder;
+        self.consumed += end;
+
+        let (header, body) = consumed.split_at_mut(header_len);
+
+        let cid_slice = if has_cid {
+            cid_range.map(|(s, e)| &header[s..e])
+        } else {
+            None
+        };
+
+        debug!(
+            "DTLS13 CT: ee(mod4)={:?}, seq={:?}, len={:?}, cid={:?}",
+            ee, seq, body.len(), cid_slice
+        );
+
+        let opaque = InboundOpaqueMessage::new(crate::ContentType::ApplicationData, ProtocolVersion::DTLSv1_2, body);
+
+        Some(Ok(IncomingRecord {
+            opaque,
+            epoch: Some(ee),   
+            seq: Some(seq),     
+            cid: cid_slice,
+        }))
+    }
+
+
+    fn process_dtls_plaintext(&mut self) -> Option<Result<IncomingRecord<'a>, Error>> {
+        let (typ, version, epoch, seq, len) = {
             let mut reader = Reader::init(self.buf);
-            match read_dtls_message_header(&mut reader, self.cid_len) {
+            match read_dtls_plaintext_header(&mut reader) {
                 Ok(h) => h,
                 Err(err) => {
                     let err = match err {
@@ -82,22 +126,15 @@ impl<'a> DeframerIter<'a> {
         self.buf = remainder;
         self.consumed += end;
 
-        let (header, body) = consumed.split_at_mut(header_len);
-
-        let cid_slice = if cid {
-            Some(&header[11..11 + self.cid_len])
-        } else {
-            None
-        };
+        let (_header, body) = consumed.split_at_mut(header_len);
 
         debug!(
-            "Type: {:?}, Version: {:?}, Epoch: {:?}, seq: {:?}, length: {:?}, cid: {:?}",
+            "Type: {:?}, Version: {:?}, Epoch: {:?}, seq: {:?}, length: {:?}",
             typ,
             version,
             epoch,
             seq,
             body.len(),
-            cid_slice
         );
 
         let opaque = InboundOpaqueMessage::new(typ, version, body);
@@ -105,7 +142,7 @@ impl<'a> DeframerIter<'a> {
             opaque,
             epoch: Some(epoch),
             seq: Some(seq),
-            cid: cid_slice,
+            cid: None,
         }))
     }
 }
@@ -114,8 +151,14 @@ impl<'a> Iterator for DeframerIter<'a> {
     type Item = Result<IncomingRecord<'a>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut reader = Reader::init(self.buf);
+        let first = *self.buf.get(0)?;
 
+        if (first & 0b1110_0000) == 0b0010_0000 {
+            return self.process_dtls13_ciphertext();
+        }
+
+        let mut reader = Reader::init(self.buf);
+        
         let (typ, version, len) = match read_opaque_message_header(&mut reader) {
             Ok(header) => header,
             Err(err) => {
@@ -133,7 +176,7 @@ impl<'a> Iterator for DeframerIter<'a> {
         };
 
         if version == ProtocolVersion::DTLSv1_2 || version == ProtocolVersion::DTLSv1_0 {
-            return self.process_dtls_message();
+            return self.process_dtls_plaintext();
         };
 
         let end = HEADER_SIZE + len as usize;

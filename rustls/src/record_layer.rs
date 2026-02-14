@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use log::debug;
 use core::cmp::min;
 
 use crate::crypto::cipher::{InboundOpaqueMessage, MessageDecrypter, MessageEncrypter};
@@ -96,6 +97,40 @@ impl RecordLayer {
                 trace!("Dropping undecryptable message after aborted early_data");
                 Ok(None)
             }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Decrypt a DTLS message, but use the record seq.
+    ///
+    /// `encr` is a decoded message allegedly received from the peer.
+    /// If it can be decrypted, its decryption is returned.  Otherwise,
+    /// an error is returned.
+    pub(crate) fn decrypt_incoming_with_seq<'a>(
+        &mut self,
+        encr: InboundOpaqueMessage<'a>,
+        seq: u64,
+    ) -> Result<Option<Decrypted<'a>>, Error> {
+        if self.decrypt_state != DirectionState::Active {
+            return Ok(Some(Decrypted {
+                want_close_before_decrypt: false,
+                plaintext: encr.into_plain_message(),
+            }));
+        }
+
+        let encrypted_len = encr.payload.len();
+
+        match self.message_decrypter.decrypt(encr, seq) {
+            Ok(plaintext) => {
+                if !self.has_decrypted {
+                    self.has_decrypted = true;
+                }
+                Ok(Some(Decrypted {
+                    want_close_before_decrypt: false,
+                    plaintext,
+                }))
+            }
+            Err(Error::DecryptError) if self.doing_trial_decryption(encrypted_len) => Ok(None),
             Err(err) => Err(err),
         }
     }

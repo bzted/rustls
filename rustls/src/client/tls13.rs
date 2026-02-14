@@ -54,6 +54,7 @@ static ALLOWED_PLAINTEXT_EXTS: &[ExtensionType] = &[
     ExtensionType::SupportedVersions,
     ExtensionType::StoredAuthKey,
     ExtensionType::EarlyAuth,
+    ExtensionType::ConnectionId,
 ];
 
 // Only the intersection of things we offer, and those disallowed
@@ -167,6 +168,20 @@ pub(super) fn handle_server_hello(
 
     match server_hello.get_connection_id() {
         Some(cid) => {
+            debug!("CID Extension in ServerHello");
+            match &config.cid {
+                Some(c) => {
+                    debug!("Read CID set");
+                    cx.common.record_layer.set_read_cid(ConnectionId::from(c));
+                }
+                None => { return Err({
+                            cx.common.send_fatal_alert(
+                                AlertDescription::IllegalParameter,
+                                PeerMisbehaved::UnsolicitedServerHelloExtension,
+                            )
+                        });}
+            }
+            
             // If the cid extension length is 0, the server will send
             // with the offered CID but does not wish the the client to include a CID when sending.
             if !cid.as_bytes().is_empty() {
@@ -175,11 +190,7 @@ pub(super) fn handle_server_hello(
                 cx.common.record_layer.set_write_cid(ConnectionId::from(cid));
             }
         }
-        None => {
-            // If the server doesn't send a CID extension, we won't 
-            // expect to receive one in its records
-            cx.common.record_layer.clear_read_cid();
-        }
+        None => {}
     }
 
     cx.common.kx_state.complete();
@@ -1282,7 +1293,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
                         let mut finished_flight = HandshakeFlightTls13::new(&mut self.transcript);
 
                         let key_schedule =
-                            auth_handshake_key_schedule.into_main_secret(None, cx.common);
+                            auth_handshake_key_schedule.into_main_secret(None);
                         let verify_data = key_schedule.sign_client_finish(
                             &finished_flight
                                 .transcript
@@ -1351,7 +1362,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
                 debug!("Client sending finished message");
                 let mut finished_flight = HandshakeFlightTls13::new(&mut self.transcript);
 
-                let key_schedule = auth_handshake_key_schedule.into_main_secret(None, cx.common);
+                let key_schedule = auth_handshake_key_schedule.into_main_secret(None);
                 let verify_data = key_schedule.sign_client_finish(
                     &finished_flight
                         .transcript
@@ -1454,10 +1465,9 @@ impl State<ClientConnectionData> for ExpectServerKemEncapsulation {
         let hs_hash = flight.transcript.current_hash();
         let key_schedule_pre_finished = self
             .auth_key_schedule
-            .into_main_secret(Some(&client_ss), cx.common);
+            .into_main_secret(Some(&client_ss));
         let verify_data = key_schedule_pre_finished.sign_client_finish(&hs_hash);
         emit_finished_tls13(&mut flight, &verify_data);
-
         flight.finish(cx.common);
 
         cx.common.check_aligned_handshake()?;
@@ -1713,7 +1723,7 @@ fn emit_certverify_tls13(
 
 fn emit_finished_tls13(flight: &mut HandshakeFlightTls13<'_>, verify_data: &crypto::hmac::Tag) {
     let verify_data_payload = Payload::new(verify_data.as_ref());
-
+    
     flight.add(HandshakeMessagePayload {
         typ: HandshakeType::Finished,
         payload: HandshakePayload::Finished(verify_data_payload),

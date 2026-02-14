@@ -60,7 +60,6 @@ fn send_dtls_datagram(
         let mut out = Vec::new();
         conn.write_tls(&mut out)?;
         if !out.is_empty() {
-            debug!("Sending DTLS datagram of {} bytes", out.len());
             socket.send(&out)?;
         } else {
             break;
@@ -74,10 +73,6 @@ fn receive_dtls_datagram(
     conn: &mut ClientConnection,
     buffer: &mut [u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    /*let n = socket.recv(buffer)?;
-    conn.read_tls(&mut &buffer[..n])?;
-    conn.process_new_packets()?;
-    Ok(())*/
     match socket.recv(buffer){
         Ok(n) =>{
             conn.read_tls(&mut &buffer[..n])?;
@@ -122,7 +117,6 @@ fn send_http_request(
 ) -> Result<(), Box<dyn std::error::Error>> {
     conn.writer().write_all(request)?;
     send_dtls_datagram(socket, conn)?;
-    debug!("HTTP request sent");
     Ok(())
 }
 
@@ -144,7 +138,6 @@ fn receive_http_response(
                 }
                 Ok(n) => {
                     plaintext.extend_from_slice(&tmp[..n]);
-                    debug!("Read {} bytes of plaintext", n);
                     // Continue reading if there might be more data
                     if plaintext.len() > 0 && n < BUFFER_SIZE {
                         break;
@@ -183,7 +176,6 @@ fn run_dtls_client(
     send_http_request(&socket, &mut conn, request)?;
 
     // Receive and display response
-    println!("Waiting for response...");
     let response = receive_http_response(&socket, &mut conn)?;
 
     println!("Response received:");
@@ -245,6 +237,8 @@ fn main() {
 
     let mut group = None;
     let mut authkem = None;
+    let mut cid = None;
+    let mut max_fragment_length = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -260,6 +254,34 @@ fn main() {
                 if authkem.is_none() {
                     eprintln!("Error: -auth requires an algorithm name");
                     std::process::exit(1);
+                }
+            }
+            "-cid" => {
+                let cid_str = args.next();
+                if cid_str.is_none() {
+                    eprintln!("Error: -cid requires an integer value");
+                    std::process::exit(1);
+                }
+                match cid_str.unwrap().parse::<u8>() {
+                    Ok(val) => cid = Some(val),
+                    Err(_) => {
+                        eprintln!("Error: -cid must be a valid integer");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            "-L" => {
+                let length_str = args.next();
+                if length_str.is_none() {
+                    eprintln!("Error: -L requires a length value");
+                    std::process::exit(1);
+                }
+                match length_str.unwrap().parse::<usize>() {
+                    Ok(val) => max_fragment_length = Some(val),
+                    Err(_) => {
+                        eprintln!("Error: -L must be a valid integer");
+                        std::process::exit(1);
+                    }
                 }
             }
             _ => {
@@ -312,7 +334,7 @@ fn main() {
     // Create our custom resolver
     let resolver = Arc::new(ClientCertResolver::new(key_pair));
 
-    let client_config = ClientConfig::builder_with_provider(crypto_provider.into())
+    let mut client_config = ClientConfig::builder_with_provider(crypto_provider.into())
         .with_safe_default_protocol_versions()
         .unwrap()
         .dangerous()
@@ -322,6 +344,15 @@ fn main() {
     let server_name = "servername".try_into().unwrap();
 
     let result = if use_dtls {
+        if let Some(length) = max_fragment_length {
+            println!("Setting max fragment size to: {}", length);
+            client_config.max_fragment_size = Some(length);
+        }
+
+        if let Some(cid_val) = cid {
+            println!("Offering CID: {}", cid_val);
+            client_config.set_cid(&[cid_val]);
+        }
         run_dtls_client(client_config, server_name)
     } else {
         run_tls_client(client_config, server_name)

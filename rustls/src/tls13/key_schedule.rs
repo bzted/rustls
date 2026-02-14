@@ -879,17 +879,7 @@ impl KeyScheduleAuthenticatedHandshake {
     pub(crate) fn into_main_secret(
         mut self,
         client_ss: Option<&[u8]>,
-        common: &mut CommonState,
     ) -> KeyScheduleMainSecret {
-        #[cfg(feature = "dtls13")]
-        {
-            common
-                .record_layer
-                .advance_write_epoch();
-            common.record_layer.advance_read_epoch();
-            debug_assert_eq!(common.record_layer.write_epoch(), 4);
-            debug_assert_eq!(common.record_layer.read_epoch(), 4);
-        }
         if let Some(client_ss) = client_ss {
             trace!("Client auth requested");
             trace!("Client shared secret length: {}", client_ss.len());
@@ -980,8 +970,8 @@ impl KeyScheduleClientTraffic {
                 .record_layer
                 .advance_write_epoch();
             common.record_layer.advance_read_epoch();
-            assert_eq!(common.record_layer.write_epoch(), 5);
-            assert_eq!(common.record_layer.read_epoch(), 5);
+            assert_eq!(common.record_layer.write_epoch(), 4);
+            assert_eq!(common.record_layer.read_epoch(), 4);
         }
 
         match side {

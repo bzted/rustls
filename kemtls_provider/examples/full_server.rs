@@ -159,7 +159,6 @@ fn send_dtls_response(
     conn.write_tls(&mut out_buf)?;
 
     socket.send_to(&out_buf, client_addr)?;
-    debug!("Response sent to client {}", client_addr);
 
     Ok(())
 }
@@ -178,7 +177,6 @@ fn handle_dtls_connection(
             }
             Err(e) => return Err(Box::new(e))
         }; 
-        debug!("Received {} bytes from {}", len, client_addr);
 
         acceptor.read_tls(&mut &buffer[..len])?;
 
@@ -218,19 +216,9 @@ fn handle_dtls_connection(
             conn.write_tls(&mut out_buf)?;
             if !out_buf.is_empty() {
                 socket.send_to(&out_buf, client_addr)?;
-                debug!("Sent {} bytes to {}", out_buf.len(), client_addr);
             }
         }
 
-        /*let (len, addr) = socket.recv_from(buffer)?;
-        if addr != client_addr {
-            debug!("Ignoring datagram from different address");
-            continue;
-        }
-
-        debug!("Received {} bytes during handshake", len);
-        conn.read_tls(&mut &buffer[..len])?;
-        conn.process_new_packets()?;*/
         match socket.recv_from(buffer){
             Ok((len, addr)) =>{
                 if addr != client_addr {
@@ -278,12 +266,21 @@ fn run_dtls_server(server_config: ServerConfig) -> Result<(), Box<dyn std::error
     }
 }
 
-fn parse_arguments() -> (Option<String>, String) {
+fn main() {
+    env_logger::init();
+
+    let use_dtls = cfg!(feature = "dtls13");
+    if use_dtls {
+        debug!("Using DTLS 1.3");
+    }
+
     let mut args = std::env::args();
     args.next();
 
     let mut group = None;
     let mut authkem = None;
+    let mut cid = None;
+    let mut max_fragment_length = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -301,6 +298,34 @@ fn parse_arguments() -> (Option<String>, String) {
                     std::process::exit(1);
                 }
             }
+            "-cid" => {
+                let cid_str = args.next();
+                if cid_str.is_none() {
+                    eprintln!("Error: -cid requires an integer value");
+                    std::process::exit(1);
+                }
+                match cid_str.unwrap().parse::<u8>() {
+                    Ok(val) => cid = Some(val),
+                    Err(_) => {
+                        eprintln!("Error: -cid must be a valid integer");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            "-L" => {
+                let length_str = args.next();
+                if length_str.is_none() {
+                    eprintln!("Error: -L requires a length value");
+                    std::process::exit(1);
+                }
+                match length_str.unwrap().parse::<usize>() {
+                    Ok(val) => max_fragment_length = Some(val),
+                    Err(_) => {
+                        eprintln!("Error: -L must be a valid integer");
+                        std::process::exit(1);
+                    }
+                }
+            }
             _ => {
                 debug!("Error: Unknown argument '{}'", arg);
                 std::process::exit(1);
@@ -309,18 +334,6 @@ fn parse_arguments() -> (Option<String>, String) {
     }
 
     let authkem = authkem.unwrap_or_else(|| "MLKEM768".to_string());
-    (group, authkem)
-}
-
-fn main() {
-    env_logger::init();
-
-    let use_dtls = cfg!(feature = "dtls13");
-    if use_dtls {
-        debug!("Using DTLS 1.3");
-    }
-
-    let (group, authkem) = parse_arguments();
 
     debug!("Starting AuthKEM server...");
 
@@ -349,7 +362,7 @@ fn main() {
         debug!("  KX group: {:?}", kx.name());
     }
 
-    let server_config = match create_server_config(kemalg, crypto_provider) {
+    let mut server_config = match create_server_config(kemalg, crypto_provider) {
         Ok(config) => config,
         Err(e) => {
             debug!("Failed to create server config: {:?}", e);
@@ -358,6 +371,16 @@ fn main() {
     };
 
     let result = if use_dtls {
+        if let Some(length) = max_fragment_length {
+            println!("Setting max fragment size to: {}", length);
+            server_config.max_fragment_size = Some(length);
+        }
+
+        if let Some(cid_val) = cid {
+            println!("Offering CID: {}", cid_val);
+            server_config.set_cid(&[cid_val]);
+        }
+
         run_dtls_server(server_config)
     } else {
         run_tls_server(server_config)
