@@ -1,5 +1,4 @@
 use alloc::boxed::Box;
-use log::debug;
 use core::cmp::min;
 
 use crate::crypto::cipher::{InboundOpaqueMessage, MessageDecrypter, MessageEncrypter};
@@ -130,8 +129,13 @@ impl RecordLayer {
                     plaintext,
                 }))
             }
-            Err(Error::DecryptError) if self.doing_trial_decryption(encrypted_len) => Ok(None),
-            Err(err) => Err(err),
+            Err(Error::DecryptError) if self.doing_trial_decryption(encrypted_len) => {
+                trace!("Dropping undecryptable message (dtls) after aborted early_data");
+                Ok(None)
+            }
+            Err(err) => {
+                Err(err)
+            }
         }
     }
 
