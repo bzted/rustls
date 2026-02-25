@@ -426,7 +426,7 @@ pub struct ServerConfig {
     /// [RFC8779]: https://datatracker.ietf.org/doc/rfc8879/
     pub cert_decompressors: Vec<&'static dyn compress::CertDecompressor>,
 
-    //#[cfg(feature = "dtls13")]
+    /// ConnectionId
     pub cid: Option<ConnectionId>,
 }
 
@@ -1006,6 +1006,15 @@ impl Accepted {
         if let Err(err) = self
             .connection
             .set_max_fragment_size(config.max_fragment_size)
+        {
+            // We have a connection here, but it won't contain an alert since the error
+            // is with the fragment size configured in the `ServerConfig`.
+            return Err((err, AcceptedAlert::empty()));
+        }
+
+        if let Err(err) = self
+            .connection
+            .set_dtls_max_fragment_size(config.max_fragment_size)
         {
             // We have a connection here, but it won't contain an alert since the error
             // is with the fragment size configured in the `ServerConfig`.
