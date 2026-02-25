@@ -51,6 +51,7 @@ impl<'a> DeframerIter<'a> {
     }
 
     fn process_dtls13_ciphertext(&mut self) -> Option<Result<IncomingRecord<'a>, Error>> {
+
         let (has_cid, ee, seq, len, header_len, cid_range) = match read_dtls13_unified_header(self.buf, self.cid_len) {
             Ok(v) => v,
             Err(err) => {
@@ -81,11 +82,11 @@ impl<'a> DeframerIter<'a> {
         };
 
         debug!(
-            "DTLS13 CT: ee(mod4)={:?}, seq={:?}, len={:?}, cid={:?}",
+            "DTLS13 CT: ee(mod4)={:?}, seq (masked)={:?}, len={:?}, cid={:?}",
             ee, seq, body.len(), cid_slice
         );
 
-        let opaque = InboundOpaqueMessage::new(crate::ContentType::ApplicationData, ProtocolVersion::DTLSv1_2, body);
+        let opaque = InboundOpaqueMessage::new_with_aad(crate::ContentType::ApplicationData, ProtocolVersion::DTLSv1_2, body, header.to_vec());
 
         Some(Ok(IncomingRecord {
             opaque,

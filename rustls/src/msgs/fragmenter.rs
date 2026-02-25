@@ -58,6 +58,7 @@ impl MessageFragmenter {
             typ,
             version,
             payload,
+            dtls_params: None,
         })
     }
 
@@ -207,6 +208,7 @@ impl DtlsFragmenter {
             typ,
             version,
             payload,
+            dtls_params: None,
         })
     }
 

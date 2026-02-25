@@ -18,6 +18,7 @@ pub struct OutboundPlainMessage<'a> {
     pub typ: ContentType,
     pub version: ProtocolVersion,
     pub payload: OutboundChunks<'a>,
+    pub dtls_params: Option<(u16, Option<Vec<u8>>, bool)>
 }
 
 impl OutboundPlainMessage<'_> {
@@ -345,7 +346,6 @@ pub(crate) fn read_dtls_plaintext_header(
     ]);
 
     let len = u16::read(r).map_err(|_| MessageError::TooShortForHeader)?;
-    debug!("Len: {len}");
     
     if typ != ContentType::ApplicationData && len == 0 {
         return Err(MessageError::InvalidEmptyPayload);
@@ -353,7 +353,6 @@ pub(crate) fn read_dtls_plaintext_header(
 
     // Reject oversize messages
     if len >= MAX_PAYLOAD {
-        debug!("peta aqui");
         return Err(MessageError::MessageTooLarge);
     }
 

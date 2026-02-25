@@ -13,6 +13,7 @@ pub struct InboundOpaqueMessage<'a> {
     pub typ: ContentType,
     pub version: ProtocolVersion,
     pub payload: BorrowedPayload<'a>,
+    pub dtls_aad: Option<Vec<u8>>,
 }
 
 impl<'a> InboundOpaqueMessage<'a> {
@@ -24,6 +25,19 @@ impl<'a> InboundOpaqueMessage<'a> {
             typ,
             version,
             payload: BorrowedPayload(payload),
+            dtls_aad: None
+        }
+    }
+
+    /// Construct a new `InboundOpaqueMessage` from constituent fields.
+    ///
+    /// `payload` is borrowed.
+    pub fn new_with_aad(typ: ContentType, version: ProtocolVersion, payload: &'a mut [u8], aad: Vec<u8>) -> Self {
+        Self {
+            typ,
+            version,
+            payload: BorrowedPayload(payload),
+            dtls_aad: Some(aad)
         }
     }
 

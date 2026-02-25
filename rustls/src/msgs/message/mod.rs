@@ -152,6 +152,7 @@ impl PlainMessage {
             version: self.version,
             typ: self.typ,
             payload: self.payload.bytes().into(),
+            dtls_params: None,
         }
     }
 }

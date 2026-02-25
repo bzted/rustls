@@ -1,6 +1,7 @@
 use alloc::boxed::Box;
 use alloc::string::ToString;
 use core::fmt;
+use std::vec::Vec;
 
 use zeroize::Zeroize;
 
@@ -248,6 +249,41 @@ pub fn make_tls13_aad(payload_len: usize) -> [u8; 5] {
     ]
 }
 
+/// Returns a DTLS 1.3 `additional_data` encoding.
+pub fn make_dtls13_aad(
+        epoch: u16,
+        unmasked_seq: u64,
+        payload_len: usize,
+        cid: Option<&[u8]>,
+        is_16bit_seq: bool, 
+    ) -> Vec<u8> {
+        let mut aad = Vec::with_capacity(5 + cid.map_or(0, |c| c.len()));
+
+        let c_bit = if cid.is_some() { 0b0001_0000 } else { 0 };
+        let s_bit = if is_16bit_seq { 0b0000_1000 } else { 0 };
+        let l_bit = 0b0000_0100; 
+        let ee_bits = (epoch % 4) as u8; 
+
+        let first_byte = 0b0010_0000 | c_bit | s_bit | l_bit | ee_bits;
+        aad.push(first_byte);
+
+
+        if let Some(c) = cid {
+            aad.extend_from_slice(c);
+        }
+
+        if is_16bit_seq {
+            aad.push((unmasked_seq >> 8) as u8);
+            aad.push((unmasked_seq & 0xFF) as u8);
+        } else {
+            aad.push((unmasked_seq & 0xFF) as u8);
+        }
+
+        aad.push((payload_len >> 8) as u8);
+        aad.push((payload_len & 0xFF) as u8);
+
+        aad
+}
 /// Returns a TLS1.2 `additional_data` encoding.
 ///
 /// See RFC5246 s6.2.3.3 for the `additional_data` definition.
