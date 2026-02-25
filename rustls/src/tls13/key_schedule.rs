@@ -1,5 +1,7 @@
 //! Key schedule maintenance for TLS1.3
 
+use std::vec::Vec;
+
 use alloc::boxed::Box;
 use alloc::string::ToString;
 use log::{debug, trace};
@@ -1035,6 +1037,13 @@ impl KeySchedule {
         let key = derive_traffic_key(expander.as_ref(), self.suite.aead_alg);
         let iv = derive_traffic_iv(expander.as_ref());
 
+        if common.is_dtls() {
+            let sn_key = derive_header_protection_key(expander.as_ref(), self.suite.aead_alg);
+            
+            let protector = crate::dtls13::crypto::header::create_header_protection(self.suite.common.suite, &sn_key);
+            common.record_layer.set_header_protection(Some(protector));
+        }
+
         common
             .record_layer
             .set_message_encrypter(
@@ -1044,9 +1053,23 @@ impl KeySchedule {
     }
 
     fn set_decrypter(&self, secret: &OkmBlock, common: &mut CommonState) {
+        let expander = self
+            .suite
+            .hkdf_provider
+            .expander_for_okm(secret);
+            
+        let key = derive_traffic_key(expander.as_ref(), self.suite.aead_alg);
+        let iv = derive_traffic_iv(expander.as_ref());
+        
+        if common.is_dtls() {
+            let sn_key = derive_header_protection_key(expander.as_ref(), self.suite.aead_alg);
+            let protector = crate::dtls13::crypto::header::create_header_protection(self.suite.common.suite, &sn_key);
+            common.record_layer.set_read_header_protection(Some(protector));
+        }
+
         common
             .record_layer
-            .set_message_decrypter(self.derive_decrypter(secret));
+            .set_message_decrypter(self.suite.aead_alg.decrypter(key, iv));
     }
 
     fn derive_decrypter(&self, secret: &OkmBlock) -> Box<dyn MessageDecrypter> {
@@ -1201,6 +1224,26 @@ impl KeySchedule {
             .expander_for_okm(&secret);
         hkdf_expand_label_slice(expander.as_ref(), b"exporter", h_context.as_ref(), out)
             .map_err(|_| Error::General("exporting too much".to_string()))
+    }
+}
+
+fn derive_header_protection_key(
+    expander: &dyn HkdfExpander,
+    aead_alg: &dyn Tls13AeadAlgorithm,
+) -> Vec<u8> {
+    // RFC 9147: [sender]_sn_key = HKDF-Expand-Label(Secret, "sn", "", key_length)
+    let key_len = aead_alg.key_len();
+    
+    match key_len {
+        16 => {
+            let key: [u8; 16] = hkdf_expand_label(expander, b"sn", &[]);
+            key.to_vec()
+        }
+        32 => {
+            let key: [u8; 32] = hkdf_expand_label(expander, b"sn", &[]);
+            key.to_vec()
+        }
+        _ => panic!("Unsupported AEAD key length: {}", key_len),
     }
 }
 
