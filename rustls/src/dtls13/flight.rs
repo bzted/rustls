@@ -31,7 +31,10 @@ impl FlightTracker {
 
     pub(crate) fn start_flight(&mut self, epoch: u16) {
         self.received_records.clear();
-        if self.current.is_none() { 
+
+        if let Some(flight) = &mut self.current {
+            flight.epoch = epoch; 
+        } else {
             self.current = Some(Flight {
                 datagrams: Vec::new(),
                 record_numbers: Vec::new(),
@@ -39,7 +42,7 @@ impl FlightTracker {
                 first_sent: None,
                 last_sent: None,
             });
-        } 
+        }
     }
 
     pub(crate) fn add_record(&mut self, datagrams: Vec<Vec<u8>>, record_nums: Vec<u64>) {
@@ -72,7 +75,7 @@ impl FlightTracker {
     pub(crate) fn process_ack_payload(&mut self, ack_data: &[u8]) -> Result<(), Error> {
         let ack = AckMessage::from_record_data(ack_data)?;
         debug!("Received ACK: {:?}", ack);
-        self.on_ack_ranges(&ack.to_ranges());
+        self.on_ack_records(&ack.to_records());
         Ok(())
     }
 
@@ -85,19 +88,10 @@ impl FlightTracker {
             .insert((epoch, seq));
         debug!("Adding received record. Epoch: {:?}, seq: {:?}. Received records: {:?}", epoch, seq, self.received_records);
         self.timer.stop();
-        //self.timer.restart();
     }
 
-    pub(crate) fn generate_ack(&mut self) -> Option<AckMessage> {
-        //debug!("Received records: {:?}", self.received_records);
-        if self.received_records.is_empty(){
-            return None
-        } 
-        
-        if !self.timer.ack_timeout(){
-            return None
-        } 
-        Some(generate_ack(&self.received_records))
+    pub(crate) fn generate_ack(&mut self) -> AckMessage {
+        generate_ack(&self.received_records)
     }
 
     pub(crate) fn timeout(&mut self) -> Option<&[Vec<u8>]> {
@@ -110,19 +104,27 @@ impl FlightTracker {
         Some(&flight.datagrams)
     }
 
-    pub(crate) fn on_ack_ranges(&mut self, ranges: &[(u16, u64, u64)]) {
-        let flight = self
-            .current
-            .as_mut()
-            .expect("no current flight");
+    pub(crate) fn pending_datagrams(&mut self) -> Option<&[Vec<u8>]> {
+        let flight = self.current.as_mut()?;
+        Some(&flight.datagrams)
+    }
+
+    pub(crate) fn on_ack_records(&mut self, acked_records: &[(u16, u64)]) {
+        let flight = match self.current.as_mut() {
+            Some(f) => f,
+            None => {
+                debug!("Received ACK but no current flight to clear");
+                return;
+            }
+        };
 
         // Remove acked records from retransmission set
         let mut i = 0;
         while i < flight.record_numbers.len() {
             let (rec_epoch, num) = flight.record_numbers[i];
             
-            let is_acked = ranges.iter().any(|(epoch, start, end)| {
-                rec_epoch == *epoch && num >= *start && num <= *end
+            let is_acked = acked_records.iter().any(|&(ack_epoch, ack_seq)| {
+                rec_epoch == ack_epoch && num == ack_seq
             });
 
             if is_acked {
@@ -133,10 +135,10 @@ impl FlightTracker {
             }
         }
 
-        debug!("Received records after processing peer ACK: {:?}", flight.record_numbers);
+        debug!("Pending records for retransmission after processing peer ACK: {:?}", flight.record_numbers);
         if flight.record_numbers.is_empty() {
             self.finish();
-        }
+        } 
     }
 
     pub(crate) fn finish(&mut self) {

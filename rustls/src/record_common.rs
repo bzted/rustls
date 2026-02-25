@@ -1,6 +1,6 @@
 use crate::{
     crypto::cipher::{MessageDecrypter, MessageEncrypter},
-    dtls13::{ack::AckMessage, record_layer::{ConnectionId, DtlsRecordLayer}},
+    dtls13::{ack::AckMessage, crypto::header::HeaderEncrypter, record_layer::{ConnectionId, DtlsRecordLayer}},
     error::Error,
     record_layer::{PreEncryptAction, RecordLayer},
 };
@@ -221,9 +221,9 @@ impl AnyRecordLayer {
         }
     }
 
-    pub(crate) fn generate_ack_message(&mut self) -> Option<AckMessage> {
+    pub(crate) fn generate_ack_message(&mut self) -> AckMessage {
         match self {
-            Self::Tls(_) => None,
+            Self::Tls(_) => panic!(),
             Self::Dtls(r) => r.as_mut().generate_ack_message(),
         }
     }
@@ -242,10 +242,17 @@ impl AnyRecordLayer {
         }
     }
 
-    pub(crate) fn retransmit(&mut self) -> Option<&[Vec<u8>]> {
+    pub(crate) fn retransmit_after_timeout(&mut self) -> Option<&[Vec<u8>]> {
         match self {
             Self::Tls(_) => None,
-            Self::Dtls(r) => r.as_mut().retransmit(),
+            Self::Dtls(r) => r.as_mut().retransmit_after_timeout(),
+        }
+    }
+
+    pub(crate) fn retransmit_after_ack(&mut self) -> Option<&[Vec<u8>]> {
+        match self {
+            Self::Tls(_) => None,
+            Self::Dtls(r) => r.as_mut().retransmit_after_ack(),
         }
     }
 
@@ -274,6 +281,20 @@ impl AnyRecordLayer {
         match self {
             Self::Tls(_) => (),
             Self::Dtls(r) => r.as_mut().clear_read_cid(),
+        }
+    }
+
+    pub(crate) fn set_header_protection(&mut self, protector: Option<Box<dyn HeaderEncrypter>>) {
+        match self {
+            Self::Tls(_) => (),
+            Self::Dtls(r) => r.as_mut().set_header_protection(protector),
+        }
+    }
+
+    pub(crate) fn set_read_header_protection(&mut self, protector: Option<Box<dyn HeaderEncrypter>>) {
+        match self {
+            Self::Tls(_) => (),
+            Self::Dtls(r) => r.as_mut().set_read_header_protection(protector),
         }
     }
 }

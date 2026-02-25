@@ -884,32 +884,10 @@ impl<Data> ConnectionCore<Data> {
         let mut buffer_progress = self.hs_deframer.progress();
 
         loop {
-            /*if let Some(ack) = self.common_state.record_layer.generate_ack_message() {
-                debug!("Sending ACK with records:{:?}", ack.record_numbers);
-                let mut buf = Vec::new();
-                ack.encode(&mut buf);
-                let ack_msg = crate::msgs::message::OutboundPlainMessage {
-                        typ: ContentType::Ack,
-                        version: ProtocolVersion::DTLSv1_2, // legacy,
-                        payload: buf.as_slice().into(),
-                    };
-                
-                let epoch = self.common_state.record_layer.write_epoch();
-                let (record_bytes, _seq) = if epoch != 0 {
-                        self.common_state.record_layer
-                            .encrypt_fragment(ack_msg)
-                    } else {
-                        self.common_state.record_layer
-                            .write_dtls_plain_record(ack_msg)
-                    };
-                self.common_state.sendable_tls.append(record_bytes);
-
-            }*/
-
             if let Some(retransmit) = self
                 .common_state
                 .record_layer
-                .retransmit()
+                .retransmit_after_timeout()
                 .map(|r| r.to_vec())
             {
                 debug!("Timer timed out, retransmiting last flight. Retransmitted records: {:?}", retransmit.len());
@@ -967,6 +945,12 @@ impl<Data> ConnectionCore<Data> {
             deframer_buffer.discard(buffer_progress.take_discard());
         }
 
+        if self.common_state.is_dtls() {
+            let leftover = deframer_buffer.filled().len();
+            if leftover > 0 {
+                deframer_buffer.discard(leftover);
+            }
+        }
         deframer_buffer.discard(buffer_progress.take_discard());
         self.state = Ok(state);
         Ok(self.common_state.current_io_state())
@@ -1030,7 +1014,9 @@ impl<Data> ConnectionCore<Data> {
                 let message = match iter.next().transpose() {
                     Ok(Some(message)) => message,
                     Ok(None) => return Ok(None),
-                    Err(err) => return Err(self.handle_deframe_error(err, state)),
+                    Err(err) => {
+                        return Err(self.handle_deframe_error(err, state))
+                    }
                 };
 
                 let allowed_plaintext = match message.opaque.typ {
@@ -1078,8 +1064,15 @@ impl<Data> ConnectionCore<Data> {
 
                     Ok(Some(message)) => message,
 
-                    Err(err) => return Err(self.handle_deframe_error(err, state)),
+                    Err(err) => {
+                        return Err(self.handle_deframe_error(err, state))
+                    }
                 };
+
+                if message.plaintext.typ == ContentType::Ack {
+                    self.common_state.dtls_retransmit();
+                    continue;
+                }
 
                 let Decrypted {
                     want_close_before_decrypt,

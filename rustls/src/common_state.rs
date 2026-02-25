@@ -5,6 +5,7 @@ use log::trace;
 use pki_types::CertificateDer;
 
 use crate::crypto::SupportedKxGroup;
+use crate::dtls13::ack::AckMessage;
 use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
@@ -488,7 +489,6 @@ impl CommonState {
             }
 
             if self.is_dtls() {
-                debug!("Protocol is UDP");
                 self.send_dtls_msg(m, must_encrypt);
                 return;
             }
@@ -532,12 +532,12 @@ impl CommonState {
                         "Message length: {:?}, Fragment length: {:?}",
                         fragment.length, fragment.fragment_length
                     );
-                    trace!("Fragment: {:?}", fragment.fragment);
 
                     let plain = OutboundPlainMessage {
                         typ: ContentType::Handshake,
                         version: ProtocolVersion::DTLSv1_2, // legacy,
                         payload: bytes.as_slice().into(),
+                        dtls_params: None,
                     };
 
                     let (record_bytes, seq) = if encrypt {
@@ -551,11 +551,6 @@ impl CommonState {
                     record_numbers.push(seq);
                     datagrams.push(record_bytes.clone());
 
-                    trace!(
-                        "Record bytes length: {:?}, Record bytes (20B): {:?}",
-                        record_bytes.len(),
-                        &record_bytes[..record_bytes.len().min(20)]
-                    );
                     self.sendable_tls.append(record_bytes);
                 }
 
@@ -566,7 +561,7 @@ impl CommonState {
 
             MessagePayload::Handshake { parsed, encoded } => {
                 self.record_layer.start_flight();
-                debug!("Sending CH or SH");
+                debug!("Sending {:?}", parsed.typ);
                 let fragments = match self.fragment_dtls13_handshake_flight(&encoded) {
                     Ok(f) => f,
                     Err(e) => {
@@ -585,12 +580,12 @@ impl CommonState {
                         "Message length: {:?}, Fragment length: {:?}",
                         fragment.length, fragment.fragment_length
                     );
-                    trace!("Fragment: {:?}", fragment.fragment);
 
                     let plain = OutboundPlainMessage {
                         typ: ContentType::Handshake,
                         version: ProtocolVersion::DTLSv1_2, // legacy,
                         payload: bytes.as_slice().into(),
+                        dtls_params: None,
                     };
 
                     let (record_bytes, seq) = if encrypt {
@@ -601,15 +596,10 @@ impl CommonState {
                             .write_dtls_plain_record(plain)
                     };
 
-                    record_numbers.push(seq);
-                    datagrams.push(record_bytes.clone());
-
-                    trace!(
-                        "Message type: {:?} , Handshake record bytes length: {:?}, Record bytes(20B): {:?}",
-                        parsed.typ,
-                        record_bytes.len(),
-                        &record_bytes[..record_bytes.len().min(20)]
-                    );
+                    if parsed.typ != HandshakeType::HelloRetryRequest {
+                        record_numbers.push(seq);
+                        datagrams.push(record_bytes.clone());
+                    }
 
                     self.sendable_tls.append(record_bytes);
                 }
@@ -652,11 +642,6 @@ impl CommonState {
                         self.record_layer
                             .write_dtls_plain_record(m)
                     };
-                    trace!(
-                        "Record bytes length: {:?}, Record bytes (20B): {:?}",
-                        bytes.0.len(),
-                        &bytes.0[..bytes.0.len().min(20)]
-                    );
                     self.sendable_tls.append(bytes.0);
                 }
             }
@@ -751,6 +736,38 @@ impl CommonState {
         self.send_msg(m, self.record_layer.is_encrypting());
         self.sent_fatal_alert = true;
         err.into()
+    }
+
+    pub(crate) fn send_dtls_ack(&mut self) {
+        let ack = self.record_layer.generate_ack_message();
+        let mut buf = Vec::new();
+        ack.encode(&mut buf);
+        let m = OutboundPlainMessage {
+            typ: ContentType::Ack,
+            version: ProtocolVersion::DTLSv1_2, // legacy,
+            payload: buf.as_slice().into(),
+            dtls_params: None,
+        };
+        let epoch = self.record_layer.write_epoch();
+        let (record_bytes, _seq) = if epoch != 0 {
+            self.record_layer.encrypt_fragment(m)
+        } else {
+            self.record_layer.write_dtls_plain_record(m)
+        };
+        self.sendable_tls.append(record_bytes);
+    }
+
+    pub(crate) fn dtls_retransmit(&mut self) {
+        match self.record_layer.retransmit_after_ack() {
+            Some(pending_messages) => {
+                debug!("Retransmiting pending datagrams after ACK. Number of records: {}", pending_messages.to_vec().len());
+                for buf in pending_messages.to_vec() {
+                    self.sendable_tls.append(buf);
+                }
+                self.record_layer.mark_sent();
+            }
+            None => {}
+        }
     }
 
     /// Queues a `close_notify` warning alert to be sent in the next
