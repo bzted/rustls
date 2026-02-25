@@ -936,7 +936,11 @@ impl Codec<'_> for ClientHelloPayload {
             random: Random::read(r)?,
             session_id: SessionId::read(r)?,
             #[cfg(feature = "dtls13")]
-            legacy_cookie: PayloadU8::empty(),
+            legacy_cookie: {
+                let len = u8::read(r)? as usize;
+                let cookie = r.take(len).ok_or(InvalidMessage::MissingData("ClientHelloPayload cookie length"))?.to_vec();
+                PayloadU8::new(cookie)
+            },
             cipher_suites: Vec::read(r)?,
             compression_methods: Vec::read(r)?,
             extensions: Vec::new(),
@@ -988,6 +992,9 @@ impl ClientHelloPayload {
             _ => self.session_id.encode(bytes),
         }
 
+        #[cfg(feature = "dtls13")]
+        self.legacy_cookie.encode(bytes);
+        
         self.cipher_suites.encode(bytes);
         self.compression_methods.encode(bytes);
 
