@@ -168,10 +168,8 @@ pub(super) fn handle_server_hello(
 
     match server_hello.get_connection_id() {
         Some(cid) => {
-            debug!("CID Extension in ServerHello");
             match &config.cid {
                 Some(c) => {
-                    debug!("Read CID set");
                     cx.common.record_layer.set_read_cid(ConnectionId::from(c));
                 }
                 None => { return Err({
