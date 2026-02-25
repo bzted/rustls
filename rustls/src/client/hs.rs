@@ -725,7 +725,7 @@ fn emit_client_hello_for_retry(
         ech_state,
     };
 
-    Ok(if support_tls13 && retryreq.is_none() {
+    Ok(if (support_tls13 || support_dtls13) && retryreq.is_none() {
         Box::new(ExpectServerHelloOrHelloRetryRequest { next, extra_exts })
     } else {
         Box::new(next)
@@ -1213,6 +1213,10 @@ impl ExpectServerHelloOrHelloRetryRequest {
             Some(ProtocolVersion::TLSv1_3) => {
                 cx.common.negotiated_version = Some(ProtocolVersion::TLSv1_3);
             }
+            Some(ProtocolVersion::DTLSv1_3) => {
+                cx.common.negotiated_version = Some(ProtocolVersion::DTLSv1_3);
+            }
+
             _ => {
                 return Err({
                     cx.common.send_fatal_alert(
