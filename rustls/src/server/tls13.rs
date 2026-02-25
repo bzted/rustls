@@ -685,8 +685,17 @@ mod client_hello {
         common: &mut CommonState,
         group: NamedGroup,
     ) {
+        let legacy_version = match common.protocol {
+            Protocol::Tcp | Protocol::Quic => {
+                ProtocolVersion::TLSv1_2
+            }
+            Protocol::Udp => {
+                ProtocolVersion::DTLSv1_2
+            }
+        };
+
         let mut req = HelloRetryRequest {
-            legacy_version: ProtocolVersion::TLSv1_2,
+            legacy_version,
             session_id,
             cipher_suite: suite.common.suite,
             extensions: Vec::new(),
@@ -695,15 +704,20 @@ mod client_hello {
         req.extensions
             .push(HelloRetryExtension::KeyShare(group));
 
-        req.extensions
-            .push(HelloRetryExtension::SupportedVersions(
-                ProtocolVersion::DTLSv1_3,
-            ));
-
-        req.extensions
+        match common.protocol {
+            Protocol::Tcp | Protocol::Quic => {
+                req.extensions
             .push(HelloRetryExtension::SupportedVersions(
                 ProtocolVersion::TLSv1_3,
             ));
+            }
+            Protocol::Udp => {
+                req.extensions
+            .push(HelloRetryExtension::SupportedVersions(
+                ProtocolVersion::DTLSv1_3,
+            ));
+            }
+        };
 
         let version = match common.protocol {
             Protocol::Tcp | Protocol::Quic => ProtocolVersion::TLSv1_2,
@@ -1932,6 +1946,8 @@ impl State<ServerConnectionData> for ExpectFinished {
         self.transcript.add_message(&m);
 
         cx.common.check_aligned_handshake()?;
+
+        cx.common.send_dtls_ack();
 
         let handshake_hash = self.transcript.current_hash();
         let resumption = ResumptionSecret::new(&key_schedule_traffic, &handshake_hash);
