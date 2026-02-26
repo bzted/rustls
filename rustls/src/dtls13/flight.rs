@@ -86,7 +86,7 @@ impl FlightTracker {
         // Add the received record to de ackable records set
         self.received_records
             .insert((epoch, seq));
-        debug!("Adding received record. Epoch: {:?}, seq: {:?}. Received records: {:?}", epoch, seq, self.received_records);
+        debug!("Received records: {:?}", self.received_records);
         self.timer.stop();
     }
 

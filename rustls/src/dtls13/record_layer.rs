@@ -120,7 +120,7 @@ impl DtlsRecordLayer {
 
         let seq = self.reconstruct_seq_num(clean_seq as u64, seq_len);
 
-        debug!("Attempting to decrypt record with seq: {:?}", seq);
+        debug!("Attempting to decrypt record with epoch {} and seq: {:?}", self.read_epoch, seq);
 
         let mut encr_with_aad = encr;
         if let Some(h) = &mut encr_with_aad.dtls_aad {
@@ -371,7 +371,6 @@ impl DtlsRecordLayer {
         &mut self,
         plain: OutboundPlainMessage<'_>,
     ) -> (Vec<u8>, u64) {
-        debug!("Writing plain message");
         let epoch = self.write_epoch;
         debug_assert_eq!(epoch, 0);
 

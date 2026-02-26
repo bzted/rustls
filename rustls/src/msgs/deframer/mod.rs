@@ -81,11 +81,6 @@ impl<'a> DeframerIter<'a> {
             None
         };
 
-        debug!(
-            "DTLS13 CT: ee(mod4)={:?}, seq (masked)={:?}, len={:?}, cid={:?}",
-            ee, seq, body.len(), cid_slice
-        );
-
         let opaque = InboundOpaqueMessage::new_with_aad(crate::ContentType::ApplicationData, ProtocolVersion::DTLSv1_2, body, header.to_vec());
 
         Some(Ok(IncomingRecord {
@@ -128,15 +123,6 @@ impl<'a> DeframerIter<'a> {
         self.consumed += end;
 
         let (_header, body) = consumed.split_at_mut(header_len);
-
-        debug!(
-            "Type: {:?}, Version: {:?}, Epoch: {:?}, seq: {:?}, length: {:?}",
-            typ,
-            version,
-            epoch,
-            seq,
-            body.len(),
-        );
 
         let opaque = InboundOpaqueMessage::new(typ, version, body);
         Some(Ok(IncomingRecord {

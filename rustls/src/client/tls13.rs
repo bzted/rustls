@@ -148,7 +148,7 @@ pub(super) fn handle_server_hello(
             KeySchedulePreHandshake::from(early_key_schedule)
         }
         (None, Some(early_key_schedule), true) => {
-            debug!("Reanudando via StoredAuthKey");
+            debug!("Resuming via StoredAuthKey");
             KeySchedulePreHandshake::from(early_key_schedule)
         }
         _ => {
@@ -312,7 +312,7 @@ fn validate_server_hello(
             ));
         }
     }
-
+    debug!("Client: Got ServerHello");
     Ok(())
 }
 
@@ -1253,7 +1253,6 @@ impl State<ClientConnectionData> for ExpectCertificate {
                 ct.clone().len(),
                 server_ss.len()
             );
-            debug!("Client sending KemEncapsulation message");
 
             let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
 
@@ -1277,17 +1276,14 @@ impl State<ClientConnectionData> for ExpectCertificate {
                 );
 
             if let Some(client_auth) = &self.client_auth {
-                debug!("CLIENT AUTH REQUESTED, SENDING CERTIFICATE");
+                debug!("Client: authentication requested, sending certificate");
                 let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
                 match client_auth {
                     ClientAuthDetails::Empty { auth_context_tls13 } => {
                         emit_certificate_tls13(&mut flight, None, auth_context_tls13.clone());
-                        debug!("Client sent empty certificate");
+                        debug!("Client sent empty certificate, proceeding without client authentication");
                         flight.finish(cx.common);
 
-                        debug!(
-                            "Continuing as if no client auth requested, sending finished message"
-                        );
                         let mut finished_flight = HandshakeFlightTls13::new(&mut self.transcript);
 
                         let key_schedule =
@@ -1298,6 +1294,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
                                 .current_hash(),
                         );
                         emit_finished_tls13(&mut finished_flight, &verify_data);
+                        debug!("Client: sending Finished message");
                         finished_flight.finish(cx.common);
                         cx.common.check_aligned_handshake()?;
 
@@ -1341,7 +1338,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
                                 auth_context_tls13.clone(),
                             );
                         }
-                        debug!("Client sent his certificate");
+                        debug!("Client: Certificate sent");
                         flight.finish(cx.common);
 
                         Ok(Box::new(ExpectServerKemEncapsulation {
@@ -1357,7 +1354,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
                     }
                 }
             } else {
-                debug!("Client sending finished message");
+                debug!("Client: sending Finished message");
                 let mut finished_flight = HandshakeFlightTls13::new(&mut self.transcript);
 
                 let key_schedule = auth_handshake_key_schedule.into_main_secret(None);
@@ -1434,7 +1431,7 @@ impl State<ClientConnectionData> for ExpectServerKemEncapsulation {
             HandshakeType::KemEncapsulation,
             HandshakePayload::KemEncapsulation
         )?;
-
+        debug!("Client: Got server KEM encapsulation message");
         let ct = server_kem.ciphertext.0.as_ref();
 
         self.transcript.add_message(&m);
@@ -1466,6 +1463,7 @@ impl State<ClientConnectionData> for ExpectServerKemEncapsulation {
             .into_main_secret(Some(&client_ss));
         let verify_data = key_schedule_pre_finished.sign_client_finish(&hs_hash);
         emit_finished_tls13(&mut flight, &verify_data);
+        debug!("Client: sending Finished message");
         flight.finish(cx.common);
 
         cx.common.check_aligned_handshake()?;
@@ -1517,6 +1515,7 @@ impl State<ClientConnectionData> for ExpectServerFinished {
         let finished =
             require_handshake_msg!(m, HandshakeType::Finished, HandshakePayload::Finished)?;
 
+        debug!("Client: Got server Finished message");
         let hs_hash = self.transcript.current_hash();
         let expect_verify_data = self
             .key_schedule

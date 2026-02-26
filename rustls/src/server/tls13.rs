@@ -448,7 +448,6 @@ mod client_hello {
 
             match (server_kem_key, authkem_psk_ss.is_some()) {
                 (Some(server_kem_key), false) => {
-                    debug!("SERVER GOING INTO EXPECT CLIENT KEM ENCAPS");
                     flight.finish(cx.common);
                     Ok(Box::new(ExpectClientKemEncapsulation {
                         config: Arc::clone(&self.config),
@@ -463,7 +462,6 @@ mod client_hello {
                 }
                 _ => {
                     if doing_early_auth {
-                        debug!("DOING EARLY AUTH");
                         flight.finish(cx.common);
                         return Ok(Box::new(ExpectEarlyAuthCertificate {
                             config: self.config,
@@ -1299,7 +1297,7 @@ impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
             HandshakeType::KemEncapsulation,
             HandshakePayload::KemEncapsulation
         )?;
-
+        debug!("Server: Got client KEM encapsulation");
         let server_ss = self
             .server_key
             .decapsulate(client_kem.ciphertext.0.as_ref())?;
@@ -1317,7 +1315,6 @@ impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
             );
 
         if self.client_auth {
-            debug!("SERVER GOING INTO EXPECT CERTIFICATE FOR CLIENT AUTH");
             Ok(Box::new(ExpectCertificateForClientAuth {
                 config: self.config,
                 transcript: self.transcript,
@@ -1328,7 +1325,6 @@ impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
             }))
         } else {
             let key_schedule = auth_handhsake_key_schedule.into_main_secret(None);
-            debug!("SERVER GOING INTO EXPECT CLIENT FINISHED");
             Ok(Box::new(ExpectClientFinished {
                 config: self.config,
                 transcript: self.transcript,
@@ -1370,13 +1366,13 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
             HandshakeType::Certificate,
             HandshakePayload::CertificateTls13
         )?;
-
+        debug!("Server: received client Certificate, about to encapsulate");
         let owned_chain = cert_chain
             .into_certificate_chain()
             .into_owned();
 
         if owned_chain.is_empty() {
-            debug!("CERTIFICATE EMPTY");
+            debug!("Server: client Certificate is empty");
             if self
                 .config
                 .verifier
@@ -1384,7 +1380,7 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
             {
                 return Err(Error::NoCertificatesPresented);
             }
-            debug!("CLIENT AUTH NOT MANDATORY, CONTINUING W/O CLIENT AUTH");
+            debug!("Server: client authentication not mandatory, proceeding without client auth");
             let key_schedule = self
                 .key_schedule
                 .into_main_secret(None);
@@ -1429,7 +1425,6 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
 
         cx.common.peer_certificates = Some(owned_chain.clone());
 
-        debug!("SERVER GOING INTO EXPECT CLIENT FINISHED");
         Ok(Box::new(ExpectClientFinished {
             config: self.config,
             transcript: self.transcript,
@@ -1527,6 +1522,7 @@ impl State<ServerConnectionData> for ExpectClientFinished {
         let finished =
             require_handshake_msg!(m, HandshakeType::Finished, HandshakePayload::Finished)?;
 
+        debug!("Server: Got client Finished");
         let hs_hash = self.transcript.current_hash();
         let expect_verify_data = self
             .key_schedule
@@ -1555,7 +1551,7 @@ impl State<ServerConnectionData> for ExpectClientFinished {
         // server finished message
         let hs_hash = self.transcript.current_hash();
         let verify_data = key_schedule.sign_server_finish(&hs_hash);
-        debug!("Server about to send finished message");
+        debug!("Server: sending Finished message");
         let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
 
         flight.add(HandshakeMessagePayload {
@@ -1745,6 +1741,7 @@ impl State<ServerConnectionData> for ExpectEarlyAuthCertificate {
             HandshakePayload::CertificateTls13
         )?;
 
+        debug!("Server: Got client certificate for early auth");
         let owned_chain = cert_chain
             .into_certificate_chain()
             .into_owned();

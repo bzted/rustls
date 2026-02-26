@@ -1249,14 +1249,6 @@ impl<Data> ConnectionCore<Data> {
         let mut reader = Reader::init(payload);
         let fragment = DtlsFragment::read(&mut reader)?;
 
-        debug!(
-            "DTLS fragment: seq={}, offset={}, len={}, total={}",
-            fragment.message_seq,
-            fragment.fragment_offset,
-            fragment.fragment_length,
-            fragment.length
-        );
-
         let typ = fragment.typ;
 
         if let Some(msg) = self

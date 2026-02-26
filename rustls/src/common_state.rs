@@ -512,7 +512,6 @@ impl CommonState {
 
         match m.payload {
             MessagePayload::HandshakeFlight(flight) => {
-                debug!("Flight len: {:?}", flight.bytes().len());
                 self.record_layer.start_flight();
                 let fragments = match self.fragment_dtls13_handshake_flight(&flight) {
                     Ok(f) => f,
@@ -877,7 +876,6 @@ impl CommonState {
 
             fragments.append(&mut frags);
         }
-        debug!("nº Fragments: {:?}", fragments.len());
         Ok(fragments)
     }
 
