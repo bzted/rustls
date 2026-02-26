@@ -8,34 +8,32 @@ oqs = { git = "https://github.com/bzted/liboqs-rust.git", branch = "main", featu
 rustls = { path = "../rustls"}
 log = "0.4.27"
 env_logger = "0.11.8"
+clap = { version = "4.0", features = ["derive"] }
 
 [features] 
 dtls13 = ["rustls/dtls13"]
 
 [[example]]
+name = "kem_c"
+path = "examples/kemtls_client.rs"
+
+
+[[example]]
+name = "kem_s"
+path = "examples/kemtls_server.rs"
+
+[[example]]
 name = "client"
 path = "examples/client.rs"
-
 
 [[example]]
 name = "server"
 path = "examples/server.rs"
 
-
-[[example]]
-name = "full_client"
-path = "examples/full_client.rs"
-
-
-[[example]]
-name = "full_server"
-path = "examples/full_server.rs"
-
-
 [[example]]
 name = "client_psk"
-path = "examples/full_client_psk.rs"
+path = "examples/client_psk.rs"
 
 [[example]]
 name = "server_psk"
-path = "examples/full_server_psk.rs"
+path = "examples/server_psk.rs"

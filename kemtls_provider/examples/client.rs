@@ -1,43 +1,17 @@
+use kemtls_provider::provider;
+use log::debug;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::CertificateDer;
+use rustls::{ClientConfig, ClientConnection, RootCertStore};
 use std::convert::TryInto;
 use std::io::{stdout, Read, Write};
 use std::net::{TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
 
-use kemtls_provider::verify::ClientVerifier;
-use kemtls_provider::{get_kx_group_by_name, provider};
-use log::debug;
-use rustls::crypto::CryptoProvider;
-use rustls::{ClientConfig, ClientConnection};
-
 const BUFFER_SIZE: usize = 4096;
-const TIMEOUT_SECS: u64 = 5;
+const TIMEOUT_SECS: u64 = 1;
 const SERVER_ADDR: &str = "127.0.0.1:8443";
-
-fn get_kem_algorithm(algorithm: &str) -> Result<oqs::kem::Algorithm, String> {
-    match algorithm.to_uppercase().as_str() {
-        "MLKEM512" => Ok(oqs::kem::Algorithm::MlKem512),
-        "MLKEM768" => Ok(oqs::kem::Algorithm::MlKem768),
-        "MLKEM1024" => Ok(oqs::kem::Algorithm::MlKem1024),
-        "BIKEL1" => Ok(oqs::kem::Algorithm::BikeL1),
-        "BIKEL3" => Ok(oqs::kem::Algorithm::BikeL3),
-        "BIKEL5" => Ok(oqs::kem::Algorithm::BikeL5),
-        "HQC128" => Ok(oqs::kem::Algorithm::Hqc128),
-        "HQC192" => Ok(oqs::kem::Algorithm::Hqc192),
-        "HQC256" => Ok(oqs::kem::Algorithm::Hqc256),
-        "NTRUPRIMESNTRUP761" => Ok(oqs::kem::Algorithm::NtruPrimeSntrup761),
-        _ => Err(format!("Unknown group: {}", algorithm)),
-    }
-}
-
-fn select_kx_group(crypto_provider: &mut CryptoProvider, group: &str) {
-    if let Some(selected_group) = get_kx_group_by_name(group) {
-        crypto_provider.kx_groups = vec![selected_group];
-    } else {
-        println!("Unknown group, using default groups");
-        println!("Available groups: MLKEM512, MLKEM768, MLKEM1024, BikeL1, BikeL3, BikeL5, Hqc128, Hqc192, Hqc256, NtruPrimeSntrup761");
-    }
-}
 
 // DTLS Helper Functions
 
@@ -71,10 +45,21 @@ fn receive_dtls_datagram(
     conn: &mut ClientConnection,
     buffer: &mut [u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let n = socket.recv(buffer)?;
-    conn.read_tls(&mut &buffer[..n])?;
-    conn.process_new_packets()?;
-    Ok(())
+    match socket.recv(buffer){
+        Ok(n) =>{
+            conn.read_tls(&mut &buffer[..n])?;
+            conn.process_new_packets()?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock =>{
+            conn.process_new_packets()?;
+        }    
+        Err(e) =>{
+            return Err(Box::new(e))
+        } 
+    }
+
+
+    Ok(()) 
 }
 
 fn perform_dtls_handshake(
@@ -213,82 +198,54 @@ fn run_tls_client(
     Ok(())
 }
 
-fn parse_arguments() -> (Option<String>, String) {
-    let mut args = std::env::args();
-    args.next();
-
-    let mut group = None;
-    let mut authkem = None;
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-group" => {
-                group = args.next();
-                if group.is_none() {
-                    eprintln!("Error: -group requires a group name");
-                    std::process::exit(1);
-                }
-            }
-            "-authkem" => {
-                authkem = args.next();
-                if authkem.is_none() {
-                    eprintln!("Error: -authkem requires an algorithm name");
-                    std::process::exit(1);
-                }
-            }
-            _ => {
-                eprintln!("Error: Unknown argument '{}'", arg);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    let authkem = authkem.unwrap_or_else(|| "MLKEM768".to_string());
-    (group, authkem)
-}
-
 fn main() {
     env_logger::init();
 
-    let use_dtls = cfg!(feature = "dtls13");
-    if use_dtls {
+    let mut use_dtls = false;
+    if cfg!(feature = "dtls13") {
         debug!("Using DTLS 1.3");
+        use_dtls = true;
     }
 
-    let (group, authkem) = parse_arguments();
+    let mut max_fragment_length = None;
+    let crypto_provider = provider();
 
-    let kemalg = match get_kem_algorithm(&authkem) {
-        Ok(alg) => {
-            println!("Selected KEM for authentication: {}", alg);
-            alg
+    let mut args = std::env::args();
+    args.next();
+    let ca_file = args.next().expect("no cert file");
+
+    let length_str = args.next();
+
+    if length_str.is_some() {
+        match length_str.unwrap().parse::<usize>() {
+                        Ok(val) => max_fragment_length = Some(val),
+                        Err(_) => {
+                            eprintln!("Error: -L must be a valid integer");
+                            std::process::exit(1);
+                        }
         }
-        Err(e) => {
-            eprintln!("Error with authkem algorithm: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let server_verifier = Arc::new(ClientVerifier::new(kemalg));
-
-    let mut crypto_provider = provider();
-
-    if let Some(ref group_name) = group {
-        println!("Selecting KX group: {}", group_name);
-        select_kx_group(&mut crypto_provider, group_name);
-    } else {
-        debug!("Using all available KX groups");
     }
 
-    let client_config = ClientConfig::builder_with_provider(crypto_provider.into())
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .dangerous()
-        .with_custom_certificate_verifier(server_verifier)
+    let mut root_store = RootCertStore::empty();
+    root_store.add_parsable_certificates(
+        CertificateDer::pem_file_iter(ca_file)
+            .expect("cannot open ca file")
+            .map(|result| result.unwrap()),
+    );
+
+    //let client_config = ClientConfig::builder_with_provider(crypto_provider.into())
+    //    .with_safe_default_protocol_versions()
+    //    .unwrap()
+    let mut client_config = ClientConfig::builder()
+        .with_root_certificates(root_store)
         .with_no_client_auth();
 
-    let server_name = "servername".try_into().unwrap();
-
+    let server_name = "testserver.com".try_into().unwrap();
     let result = if use_dtls {
+        if let Some(length) = max_fragment_length {
+            println!("Setting max fragment size to: {}", length);
+            client_config.max_fragment_size = Some(length);
+        }
         run_dtls_client(client_config, server_name)
     } else {
         run_tls_client(client_config, server_name)

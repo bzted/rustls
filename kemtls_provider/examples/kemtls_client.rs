@@ -4,6 +4,7 @@ use std::net::{TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
 
+use clap::Parser;
 use kemtls_provider::resolver::{ClientCertResolver, KeyPair};
 use kemtls_provider::sign::DummySigningKey;
 use kemtls_provider::verify::ClientVerifier;
@@ -15,7 +16,38 @@ use rustls::{ClientConfig, ClientConnection};
 
 const BUFFER_SIZE: usize = 4096;
 const TIMEOUT_SECS: u64 = 1;
-const SERVER_ADDR: &str = "127.0.0.1:8443";
+
+#[derive(Parser, Debug)]
+#[command(about = "Cliente KEMTLS/DTLS 1.3")]
+struct ClientArgs {
+    /// KX group to use (e.g. MLKEM768, BikeL3, Hqc192, NtruPrimeSntrup761)
+    #[arg(short, long)]
+    group: Option<String>,
+
+    /// KEM algorithm to use for client authentication
+    #[arg(short, long, default_value = "MLKEM768")]
+    authkem: String,
+
+    /// Optional CID value to offer in DTLS (0-255)
+    #[arg(short, long)]
+    cid: Option<u8>,
+
+    /// Maximum fragment length for DTLS
+    #[arg(short = 'L', long, default_value_t = 1400)]
+    max_fragment_length: usize,
+
+    /// Disables client authentication
+    #[arg(short = 'd', long = "client_auth", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    client_auth: bool,
+
+    /// Port to connect to
+    #[arg(short, long, default_value_t = 8443)]
+    port: u16,
+
+    /// Address to connect to
+    #[arg(long, default_value = "127.0.0.1")]
+    addr: String,
+}
 
 fn get_kem_algorithm(algorithm: &str) -> Result<oqs::kem::Algorithm, String> {
     match algorithm.to_uppercase().as_str() {
@@ -44,9 +76,9 @@ fn select_kx_group(crypto_provider: &mut CryptoProvider, group: &str) {
 
 // DTLS Helper Functions
 
-fn setup_udp_socket() -> Result<UdpSocket, std::io::Error> {
+fn setup_udp_socket(server_addr: &str) -> Result<UdpSocket, std::io::Error> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
-    socket.connect(SERVER_ADDR)?;
+    socket.connect(server_addr)?;
     socket.set_read_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
     socket.set_write_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
     Ok(socket)
@@ -164,15 +196,16 @@ fn receive_http_response(
 fn run_dtls_client(
     client_config: ClientConfig,
     server_name: rustls::pki_types::ServerName<'static>,
+    server_addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let socket = setup_udp_socket()?;
+    let socket = setup_udp_socket(server_addr)?;
     let mut conn = ClientConnection::new_dtls(Arc::new(client_config), server_name)?;
 
     // Perform DTLS handshake
     perform_dtls_handshake(&socket, &mut conn)?;
 
     // Send HTTP request
-    let request = b"GET / HTTP/1.1\r\nHost: example\r\nConnection: close\r\n\r\n";
+    let request = b"Hello from DTLS client\n";
     send_http_request(&socket, &mut conn, request)?;
 
     // Receive and display response
@@ -187,10 +220,11 @@ fn run_dtls_client(
 fn run_tls_client(
     client_config: ClientConfig,
     server_name: rustls::pki_types::ServerName<'static>,
+    server_addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = ClientConnection::new(Arc::new(client_config), server_name)?;
-    debug!("Connecting to server at {}...", SERVER_ADDR);
-    let mut stream = TcpStream::connect(SERVER_ADDR)?;
+    println!("Connecting to server at {}", server_addr);
+    let mut stream = TcpStream::connect(server_addr)?;
     stream.set_nodelay(true)?;
 
     let mut tls_stream = rustls::Stream::new(&mut client, &mut stream);
@@ -228,84 +262,22 @@ fn main() {
 
     let mut use_dtls = false;
     if cfg!(feature = "dtls13") {
-        debug!("Using DTLS 1.3");
+        println!("Using DTLS 1.3");
         use_dtls = true;
     }
 
-    let mut args = std::env::args();
-    args.next();
-
-    let mut group = None;
-    let mut authkem = None;
-    let mut cid = None;
-    let mut max_fragment_length = None;
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-group" => {
-                group = args.next();
-                if group.is_none() {
-                    eprintln!("Error: -group requires a group name");
-                    std::process::exit(1);
-                }
-            }
-            "-authkem" => {
-                authkem = args.next();
-                if authkem.is_none() {
-                    eprintln!("Error: -auth requires an algorithm name");
-                    std::process::exit(1);
-                }
-            }
-            "-cid" => {
-                let cid_str = args.next();
-                if cid_str.is_none() {
-                    eprintln!("Error: -cid requires an integer value");
-                    std::process::exit(1);
-                }
-                match cid_str.unwrap().parse::<u8>() {
-                    Ok(val) => cid = Some(val),
-                    Err(_) => {
-                        eprintln!("Error: -cid must be a valid integer");
-                        std::process::exit(1);
-                    }
-                }
-            }
-            "-L" => {
-                let length_str = args.next();
-                if length_str.is_none() {
-                    eprintln!("Error: -L requires a length value");
-                    std::process::exit(1);
-                }
-                match length_str.unwrap().parse::<usize>() {
-                    Ok(val) => max_fragment_length = Some(val),
-                    Err(_) => {
-                        eprintln!("Error: -L must be a valid integer");
-                        std::process::exit(1);
-                    }
-                }
-            }
-            _ => {
-                eprintln!("Error: Unknown argument '{}'", arg);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    // If authkem algorithm not provided, we use MLKEM768 as default
-    let authkem = authkem.unwrap_or_else(|| "MLKEM768".to_string());
+    let args = ClientArgs::parse();
 
     let mut crypto_provider = provider();
 
-    if let Some(ref group_name) = group {
+    if let Some(ref group_name) = args.group {
         println!("Selecting KX group: {}", group_name);
         select_kx_group(&mut crypto_provider, group_name);
     } else {
         debug!("Using all available KX groups");
     }
 
-    debug!("Trying client authentication");
-
-    let kemalg = match get_kem_algorithm(&authkem) {
+    let kemalg = match get_kem_algorithm(&args.authkem) {
         Ok(alg) => {
             println!("Selected KEM for authentication: {}", alg);
             alg
@@ -334,28 +306,35 @@ fn main() {
     // Create our custom resolver
     let resolver = Arc::new(ClientCertResolver::new(key_pair));
 
-    let mut client_config = ClientConfig::builder_with_provider(crypto_provider.into())
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .dangerous()
-        .with_custom_certificate_verifier(server_verifier)
-        .with_client_cert_resolver(resolver);
-
+    let mut client_config = match args.client_auth {
+        true => ClientConfig::builder_with_provider(crypto_provider.into())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(server_verifier)
+            .with_client_cert_resolver(resolver),
+        false => ClientConfig::builder_with_provider(crypto_provider.into())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(server_verifier)
+            .with_no_client_auth()
+    };
+    
+    let server_addr = format!("{}:{}", args.addr, args.port);
     let server_name = "servername".try_into().unwrap();
 
     let result = if use_dtls {
-        if let Some(length) = max_fragment_length {
-            println!("Setting max fragment size to: {}", length);
-            client_config.max_fragment_size = Some(length);
-        }
+        println!("Max fragment size set to: {}", args.max_fragment_length);
+        client_config.max_fragment_size = Some(args.max_fragment_length);
 
-        if let Some(cid_val) = cid {
+        if let Some(cid_val) = args.cid {
             println!("Offering CID: {}", cid_val);
             client_config.set_cid(&[cid_val]);
         }
-        run_dtls_client(client_config, server_name)
+        run_dtls_client(client_config, server_name, &server_addr)
     } else {
-        run_tls_client(client_config, server_name)
+        run_tls_client(client_config, server_name, &server_addr)
     };
 
     if let Err(e) = result {

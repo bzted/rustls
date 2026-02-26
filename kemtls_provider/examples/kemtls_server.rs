@@ -11,17 +11,40 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
+use clap::Parser;
 
 const BUFFER_SIZE: usize = 4096;
-const SERVER_PORT: u16 = 8443;
 const TIMEOUT_SECS: u64 = 1;
-const HTTP_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\n\
-                                Connection: closed\r\n\
-                                Content-Type: text/html\r\n\
-                                \r\n\
-                                <h1>Hello Authenticated World!</h1>\r\n";
-const DTLS_HTTP_RESPONSE: &[u8] =
-    b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nHello World, I'm using DTLS 1.3!";
+const HTTP_RESPONSE: &[u8] = b"Hello from TLS Server!";
+const DTLS_HTTP_RESPONSE: &[u8] = b"Hello from DTLS Server!";
+
+#[derive(Parser, Debug)]
+#[command(about = "KEMTLS Server with TLS 1.3 and DTLS 1.3 support")]
+struct ServerArgs {
+    /// KEM algorithm to use for authentication
+    #[arg(short, long, default_value = "MLKEM768")]
+    authkem: String,
+
+    /// KX group to offer
+    #[arg(short, long)]
+    group: Option<String>,
+
+    /// Optional CID value to offer in DTLS (0-255)
+    #[arg(short, long)]
+    cid: Option<u8>,
+
+    /// Max fragment length for DTLS 
+    #[arg(short = 'L', long, default_value_t = 1400)]
+    max_fragment_length: usize,
+
+    /// Disable client authentication 
+    #[arg(short = 'd', long = "disable-client-auth", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    client_auth: bool,
+    
+    /// Port to listen on 
+    #[arg(short, long, default_value_t = 8443)]
+    port: u16,
+}
 
 fn get_kem_algorithm(algorithm: &str) -> Result<oqs::kem::Algorithm, String> {
     match algorithm.to_uppercase().as_str() {
@@ -51,6 +74,7 @@ fn select_kx_group(crypto_provider: &mut CryptoProvider, group: &str) {
 fn create_server_config(
     kemalg: oqs::kem::Algorithm,
     crypto_provider: CryptoProvider,
+    client_auth: bool,
 ) -> Result<ServerConfig, Box<dyn std::error::Error>> {
     let kem = Kem::new(kemalg)?;
     let (public_key, secret_key) = kem.keypair()?;
@@ -62,14 +86,17 @@ fn create_server_config(
     let resolver = Arc::new(ServerCertResolver::new(key_pair));
     let client_verifier = Arc::new(ServerVerifier::new(kemalg));
 
-    let mut server_config = ServerConfig::builder_with_provider(crypto_provider.into())
-        .with_safe_default_protocol_versions()?
-        .with_client_cert_verifier(client_verifier)
-        .with_cert_resolver(resolver);
+    let mut server_config = match client_auth {
+        true => ServerConfig::builder_with_provider(crypto_provider.into())
+            .with_safe_default_protocol_versions()?
+            .with_client_cert_verifier(client_verifier)
+            .with_cert_resolver(resolver),
+        false => ServerConfig::builder_with_provider(crypto_provider.into()).with_safe_default_protocol_versions()?.with_no_client_auth().with_cert_resolver(resolver)
+    };
 
     server_config.key_log = Arc::new(rustls::KeyLogFile::new());
 
-    debug!("Server config created successfully");
+    println!("Server config created successfully");
     Ok(server_config)
 }
 
@@ -117,7 +144,7 @@ fn handle_tls_client(
     conn.writer().write_all(HTTP_RESPONSE)?;
     conn.write_tls(&mut stream)?;
     conn.complete_io(&mut stream)?;
-
+    debug!("Response sent to client");
     // Close connection gracefully
     conn.send_close_notify();
     conn.write_tls(&mut stream)?;
@@ -125,9 +152,9 @@ fn handle_tls_client(
     Ok(())
 }
 
-fn run_tls_server(server_config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let listener = TcpListener::bind(format!("[::]:{}", SERVER_PORT))?;
-    println!("TLS server listening on port {}", SERVER_PORT);
+fn run_tls_server(server_config: ServerConfig, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind(format!("[::]:{}", port))?;
+    println!("TLS server listening on port {}", port);
 
     for stream in listener.incoming() {
         match stream {
@@ -159,6 +186,7 @@ fn send_dtls_response(
     conn.write_tls(&mut out_buf)?;
 
     socket.send_to(&out_buf, client_addr)?;
+    debug!("Response sent to client {}", client_addr);
 
     Ok(())
 }
@@ -225,8 +253,34 @@ fn handle_dtls_connection(
                     debug!("Addres missmatch");
                     continue;
                 } 
+                conn.read_tls(&mut &buffer[..len])?;
+                conn.process_new_packets()?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock =>{
+                conn.process_new_packets()?;
+            }    
+            Err(e) =>{
+                return Err(Box::new(e))
+            } 
+        } 
+    }
+
+    debug!("Handshake completed!");
+
+    match socket.recv_from(buffer) {
+        Ok((len, addr)) =>{
+            if addr != client_addr {
+                return Err("Address missmatch".into());
+            } 
             conn.read_tls(&mut &buffer[..len])?;
-            conn.process_new_packets()?;
+            let io_state = conn.process_new_packets()?;
+
+            if io_state.plaintext_bytes_to_read() > 0 {
+                let mut reader = conn.reader();
+                let mut msg = vec![0u8; io_state.plaintext_bytes_to_read()];
+                let n = reader.read(&mut msg)?;
+                debug!("Client says: {:?}", String::from_utf8_lossy(&msg[..n]));
+            }
         }
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock =>{
             conn.process_new_packets()?;
@@ -234,23 +288,33 @@ fn handle_dtls_connection(
         Err(e) =>{
             return Err(Box::new(e))
         } 
-        } 
-    }
-
-    debug!("Handshake completed!");
+    } 
 
     send_dtls_response(socket, &mut conn, client_addr, DTLS_HTTP_RESPONSE)?;
 
+    while let Ok((len, addr)) = socket.recv_from(buffer) {
+        if addr == client_addr {
+            conn.read_tls(&mut &buffer[..len])?;
+            let io_state = conn.process_new_packets()?;
+            
+            if io_state.plaintext_bytes_to_read() > 0 {
+                let mut reader = conn.reader();
+                let mut msg = vec![0u8; io_state.plaintext_bytes_to_read()];
+                let n = reader.read(&mut msg)?;
+                debug!("Client says: {:?}", String::from_utf8_lossy(&msg[..n]));
+            }
+        }
+    }
     Ok(())
 }
 
-fn run_dtls_server(server_config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let socket = UdpSocket::bind(format!("[::]:{}", SERVER_PORT))?;
+fn run_dtls_server(server_config: ServerConfig, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let socket = UdpSocket::bind(format!("[::]:{}", port))?;
     socket.set_read_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
     socket.set_write_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
 
     socket.set_nonblocking(false)?;
-    println!("DTLS server listening on port {}", SERVER_PORT);
+    println!("DTLS server listening on port {}", port);
 
     let mut buffer = [0u8; BUFFER_SIZE];
 
@@ -261,7 +325,7 @@ fn run_dtls_server(server_config: ServerConfig) -> Result<(), Box<dyn std::error
             handle_dtls_connection(&socket, acceptor, server_config.clone(), &mut buffer)
         {
             debug!("Error handling DTLS connection: {:?}", e);
-            continue;
+            return Err(e);
         }
     }
 }
@@ -271,73 +335,14 @@ fn main() {
 
     let use_dtls = cfg!(feature = "dtls13");
     if use_dtls {
-        debug!("Using DTLS 1.3");
+        println!("Using DTLS 1.3");
     }
 
-    let mut args = std::env::args();
-    args.next();
+    let args = ServerArgs::parse();
 
-    let mut group = None;
-    let mut authkem = None;
-    let mut cid = None;
-    let mut max_fragment_length = None;
+    println!("Starting KEMTLS Server...");
 
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-group" => {
-                group = args.next();
-                if group.is_none() {
-                    debug!("Error: -group requires a group name");
-                    std::process::exit(1);
-                }
-            }
-            "-authkem" => {
-                authkem = args.next();
-                if authkem.is_none() {
-                    debug!("Error: -authkem requires an algorithm name");
-                    std::process::exit(1);
-                }
-            }
-            "-cid" => {
-                let cid_str = args.next();
-                if cid_str.is_none() {
-                    eprintln!("Error: -cid requires an integer value");
-                    std::process::exit(1);
-                }
-                match cid_str.unwrap().parse::<u8>() {
-                    Ok(val) => cid = Some(val),
-                    Err(_) => {
-                        eprintln!("Error: -cid must be a valid integer");
-                        std::process::exit(1);
-                    }
-                }
-            }
-            "-L" => {
-                let length_str = args.next();
-                if length_str.is_none() {
-                    eprintln!("Error: -L requires a length value");
-                    std::process::exit(1);
-                }
-                match length_str.unwrap().parse::<usize>() {
-                    Ok(val) => max_fragment_length = Some(val),
-                    Err(_) => {
-                        eprintln!("Error: -L must be a valid integer");
-                        std::process::exit(1);
-                    }
-                }
-            }
-            _ => {
-                debug!("Error: Unknown argument '{}'", arg);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    let authkem = authkem.unwrap_or_else(|| "MLKEM768".to_string());
-
-    debug!("Starting AuthKEM server...");
-
-    let kemalg = match get_kem_algorithm(&authkem) {
+    let kemalg = match get_kem_algorithm(&args.authkem) {
         Ok(alg) => {
             println!("Selected KEM for authentication: {}", alg);
             alg
@@ -350,19 +355,19 @@ fn main() {
 
     let mut crypto_provider = provider();
 
-    if let Some(ref group_name) = group {
+    if let Some(ref group_name) = args.group {
         println!("Selecting KX group: {}", group_name);
         select_kx_group(&mut crypto_provider, group_name);
     } else {
-        debug!("Using all available KX groups");
+        println!("Using all available KX groups");
     }
 
-    debug!("Provider has {} kx_groups", crypto_provider.kx_groups.len());
+    println!("Provider has {} kx_groups", crypto_provider.kx_groups.len());
     for kx in &crypto_provider.kx_groups {
-        debug!("  KX group: {:?}", kx.name());
+        println!("  KX group: {:?}", kx.name());
     }
 
-    let mut server_config = match create_server_config(kemalg, crypto_provider) {
+    let mut server_config = match create_server_config(kemalg, crypto_provider, args.client_auth) {
         Ok(config) => config,
         Err(e) => {
             debug!("Failed to create server config: {:?}", e);
@@ -371,19 +376,17 @@ fn main() {
     };
 
     let result = if use_dtls {
-        if let Some(length) = max_fragment_length {
-            println!("Setting max fragment size to: {}", length);
-            server_config.max_fragment_size = Some(length);
-        }
+        println!("Max fragment size set to: {}", args.max_fragment_length);
+        server_config.max_fragment_size = Some(args.max_fragment_length);
 
-        if let Some(cid_val) = cid {
+        if let Some(cid_val) = args.cid {
             println!("Offering CID: {}", cid_val);
             server_config.set_cid(&[cid_val]);
         }
 
-        run_dtls_server(server_config)
+        run_dtls_server(server_config, args.port)
     } else {
-        run_tls_server(server_config)
+        run_tls_server(server_config, args.port)
     };
 
     if let Err(e) = result {

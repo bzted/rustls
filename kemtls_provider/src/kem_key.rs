@@ -23,7 +23,6 @@ impl KemKey for MlKemKey {
         let sk = oqs::kem::Kem::secret_key_from_bytes(&kem, &self.sk)
             .ok_or_else(|| Error::General("Invalid private key".into()))?;
 
-        debug!("Ciphertext size: {} bytes", ciphertext.len());
         let ct = oqs::kem::Kem::ciphertext_from_bytes(&kem, ciphertext)
             .ok_or_else(|| Error::General("Invalid ciphertext".into()))?;
 
@@ -31,8 +30,7 @@ impl KemKey for MlKemKey {
             debug!("Decapsulation failed: {}", e);
             Error::General("Decapsulation failed".into())
         })?;
-        debug!("Decapsulation successful!");
-        debug!("Shared secret size: {} bytes", ss.as_ref().len());
+        debug!("DECAPSULATION RESULT : ct: {} bytes, ss: {} bytes", ct.as_ref().len(), ss.as_ref().len());
 
         Ok(ss.as_ref().to_vec())
     }
