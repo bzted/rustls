@@ -78,6 +78,7 @@ fn select_kx_group(crypto_provider: &mut CryptoProvider, group: &str) {
 
 fn setup_udp_socket(server_addr: &str) -> Result<UdpSocket, std::io::Error> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
+    socket.set_nonblocking(true)?;
     socket.connect(server_addr)?;
     socket.set_read_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
     socket.set_write_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
@@ -117,8 +118,6 @@ fn receive_dtls_datagram(
             return Err(Box::new(e))
         } 
     }
-
-
     Ok(()) 
 }
 
@@ -128,17 +127,21 @@ fn perform_dtls_handshake(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut in_buf = [0u8; BUFFER_SIZE];
 
-    loop {
+    while conn.is_handshaking() {
         send_dtls_datagram(socket, conn)?;
 
-        if !conn.is_handshaking() {
-            debug!("DTLS handshake completed");
-            break;
+        match socket.recv(&mut in_buf) {
+            Ok(n) => {
+                conn.read_tls(&mut &in_buf[..n])?;
+                conn.process_new_packets()?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                conn.process_new_packets()?;
+            }
+            Err(e) => return Err(Box::new(e)),
         }
-
-        receive_dtls_datagram(socket, conn, &mut in_buf)?;
     }
-
+    println!("DTLS handshake completed");
     Ok(())
 }
 
@@ -158,9 +161,9 @@ fn receive_http_response(
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut in_buf = [0u8; BUFFER_SIZE];
     let mut plaintext = Vec::new();
-    let mut tmp = [0u8; BUFFER_SIZE];
-
+    
     loop {
+        let mut tmp = [0u8; BUFFER_SIZE];
         // Try to read already decrypted data
         {
             let mut reader = conn.reader();

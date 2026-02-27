@@ -265,47 +265,47 @@ fn handle_dtls_connection(
         } 
     }
 
-    debug!("Handshake completed!");
+    println!("Handshake completed!");
 
-    match socket.recv_from(buffer) {
-        Ok((len, addr)) =>{
-            if addr != client_addr {
-                return Err("Address missmatch".into());
-            } 
-            conn.read_tls(&mut &buffer[..len])?;
-            let io_state = conn.process_new_packets()?;
-
-            if io_state.plaintext_bytes_to_read() > 0 {
-                let mut reader = conn.reader();
-                let mut msg = vec![0u8; io_state.plaintext_bytes_to_read()];
-                let n = reader.read(&mut msg)?;
-                debug!("Client says: {:?}", String::from_utf8_lossy(&msg[..n]));
+    loop {
+        while conn.wants_write() {
+            let mut out_buf = Vec::new();
+            conn.write_tls(&mut out_buf)?;
+            if !out_buf.is_empty() {
+                socket.send_to(&out_buf, client_addr)?;
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock =>{
-            conn.process_new_packets()?;
-        }    
-        Err(e) =>{
-            return Err(Box::new(e))
-        } 
-    } 
 
-    send_dtls_response(socket, &mut conn, client_addr, DTLS_HTTP_RESPONSE)?;
-
-    while let Ok((len, addr)) = socket.recv_from(buffer) {
-        if addr == client_addr {
-            conn.read_tls(&mut &buffer[..len])?;
-            let io_state = conn.process_new_packets()?;
-            
-            if io_state.plaintext_bytes_to_read() > 0 {
-                let mut reader = conn.reader();
-                let mut msg = vec![0u8; io_state.plaintext_bytes_to_read()];
-                let n = reader.read(&mut msg)?;
-                debug!("Client says: {:?}", String::from_utf8_lossy(&msg[..n]));
+        match socket.recv_from(buffer) {
+            Ok((len, addr)) => {
+                if addr != client_addr { continue; }
+                
+                if let Err(e) = conn.read_tls(&mut &buffer[..len]) {
+                    debug!("Error de lectura TLS: {:?}", e);
+                    continue;
+                }
+                
+                match conn.process_new_packets() {
+                    Ok(io_state) => {
+                        if io_state.plaintext_bytes_to_read() > 0 {
+                            let mut reader = conn.reader();
+                            let mut msg = vec![0u8; io_state.plaintext_bytes_to_read()];
+                            reader.read_exact(&mut msg)?;
+                            println!("Client says: {:?}", String::from_utf8_lossy(&msg));
+                            
+                            send_dtls_response(socket, &mut conn, client_addr, DTLS_HTTP_RESPONSE)?;
+                            return Ok(()); 
+                        }
+                    }
+                    Err(e) => return Err(Box::new(e)),
+                }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                conn.process_new_packets()?;
+            }
+            Err(e) => return Err(Box::new(e)),
         }
     }
-    Ok(())
 }
 
 fn run_dtls_server(server_config: ServerConfig, port: u16) -> Result<(), Box<dyn std::error::Error>> {
@@ -313,7 +313,7 @@ fn run_dtls_server(server_config: ServerConfig, port: u16) -> Result<(), Box<dyn
     socket.set_read_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
     socket.set_write_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
 
-    socket.set_nonblocking(false)?;
+    socket.set_nonblocking(true)?;
     println!("DTLS server listening on port {}", port);
 
     let mut buffer = [0u8; BUFFER_SIZE];
