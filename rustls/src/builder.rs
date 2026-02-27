@@ -176,7 +176,7 @@ impl<Side: ConfigSide, State> ConfigBuilder<Side, State> {
     }
 }
 
-impl<Side: ConfigSide, State: fmt::Debug> fmt::Debug for ConfigBuilder<Side, State> {
+impl<Side: ConfigSide, State: Debug> Debug for ConfigBuilder<Side, State> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let side_name = core::any::type_name::<Side>();
         let (ty, _) = side_name
