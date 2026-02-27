@@ -1,75 +1,69 @@
-use kemtls_provider::resolver::{KeyPair, ServerCertResolver};
-use kemtls_provider::sign::DummySigningKey;
-use kemtls_provider::{get_kx_group_by_name, provider, MlKemKey};
+use kemtls_provider::provider;
 use log::debug;
-use oqs::kem::Kem;
-use rustls::crypto::CryptoProvider;
-use rustls::server::Acceptor;
-use rustls::{ServerConfig, ServerConnection};
-use std::io::Read;
-use std::io::Write;
-use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
+use rustls::server::{Acceptor, WebPkiClientVerifier};
+use rustls::{RootCertStore, ServerConfig};
+use std::io::{Read, Write};
+use std::net::UdpSocket;
 use std::sync::Arc;
+use rustls::ServerConnection;
+use std::net::TcpStream;
+use std::net::TcpListener;
+use std::net::SocketAddr;
+use std::time::Duration;
+use clap::Parser;
 
 const BUFFER_SIZE: usize = 4096;
 const SERVER_PORT: u16 = 8443;
+const TIMEOUT_SECS: u64 = 1;
 const HTTP_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\n\
                                 Connection: closed\r\n\
                                 Content-Type: text/html\r\n\
                                 \r\n\
-                                <h1>Hello World!</h1>\r\n";
-const DTLS_HTTP_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nHello World!";
+                                <h1>Hello Authenticated World!</h1>\r\n";
+const DTLS_HTTP_RESPONSE: &[u8] =
+    b"Hello World, I'm using DTLS 1.3!";
 
-fn get_kem_algorithm(algorithm: &str) -> Result<oqs::kem::Algorithm, String> {
-    match algorithm.to_uppercase().as_str() {
-        "MLKEM512" => Ok(oqs::kem::Algorithm::MlKem512),
-        "MLKEM768" => Ok(oqs::kem::Algorithm::MlKem768),
-        "MLKEM1024" => Ok(oqs::kem::Algorithm::MlKem1024),
-        "BIKEL1" => Ok(oqs::kem::Algorithm::BikeL1),
-        "BIKEL3" => Ok(oqs::kem::Algorithm::BikeL3),
-        "BIKEL5" => Ok(oqs::kem::Algorithm::BikeL5),
-        "HQC128" => Ok(oqs::kem::Algorithm::Hqc128),
-        "HQC192" => Ok(oqs::kem::Algorithm::Hqc192),
-        "HQC256" => Ok(oqs::kem::Algorithm::Hqc256),
-        "NTRUPRIMESNTRUP761" => Ok(oqs::kem::Algorithm::NtruPrimeSntrup761),
-        _ => Err(format!("Unknown group: {}", algorithm)),
-    }
+#[derive(Parser, Debug)]
+#[command(author, version, about = "Descripción de tu aplicación", long_about = None)]
+struct Args {
+    /// KX group to use (e.g. MLKEM768, BikeL3, Hqc192, NtruPrimeSntrup761)
+    #[arg(long)]
+    group: Option<String>,
+
+    /// Optional CID value to offer in DTLS (0-255)
+    #[arg(long)]
+    cid: Option<u8>,
+
+    /// Maximum fragment length for DTLS
+    #[arg(short = 'L', default_value_t = 1400)]
+    max_fragment_length: usize,
+
+    /// Disables client authentication
+    #[arg(short = 'd', default_value_t = true, action = clap::ArgAction::SetFalse)]
+    client_auth: bool,
+
+    /// Certificate File
+    #[arg(short = 'c', default_value = "../test-ca/rsa-2048/end.fullchain")]
+    cert_file: String,
+
+    /// Key file
+    #[arg(short = 'k', default_value = "../test-ca/rsa-2048/end.key")]
+    pk_file: String,
+
+    /// Certificate Authority file
+    #[arg(short = 'A', default_value = "../test-ca/rsa-2048/ca.cert")]
+    ca_file: String,
+
+    /// Port to listen on 
+    #[arg(short, long, default_value_t = 8443)]
+    port: u16,
+
+    /// Activates PQC provider
+    #[arg(short = 'q' ,long, default_value_t = false, action = clap::ArgAction::SetTrue)]
+    pqc_provider: bool,
 }
-
-fn select_kx_group(crypto_provider: &mut CryptoProvider, group: &str) {
-    if let Some(selected_group) = get_kx_group_by_name(group) {
-        crypto_provider.kx_groups = vec![selected_group];
-    } else {
-        println!("Unknown group, using default groups");
-        println!("Available groups: MLKEM512, MLKEM768, MLKEM1024, BikeL1, BikeL3, BikeL5, Hqc128, Hqc192, Hqc256, NtruPrimeSntrup761");
-    }
-}
-
-fn create_server_config(
-    kemalg: oqs::kem::Algorithm,
-    crypto_provider: CryptoProvider,
-) -> Result<ServerConfig, Box<dyn std::error::Error>> {
-    let kem = Kem::new(kemalg)?;
-    let (public_key, secret_key) = kem.keypair()?;
-
-    let signing_key = Arc::new(DummySigningKey);
-    let kem_key = Arc::new(MlKemKey::new(kemalg, secret_key.as_ref().to_vec()));
-    let key_pair = KeyPair::new(public_key, signing_key, Some(kem_key));
-
-    let resolver = Arc::new(ServerCertResolver::new(key_pair));
-
-    let mut server_config = ServerConfig::builder_with_provider(crypto_provider.into())
-        .with_safe_default_protocol_versions()?
-        .with_no_client_auth()
-        .with_cert_resolver(resolver);
-
-    server_config.key_log = Arc::new(rustls::KeyLogFile::new());
-
-    debug!("Server config created successfully");
-    Ok(server_config)
-}
-
-// TLS Helper Functions
 
 fn handle_tls_client(
     mut stream: TcpStream,
@@ -83,10 +77,10 @@ fn handle_tls_client(
             Ok(Some(accepted)) => break accepted,
             Ok(None) => continue,
             Err((err, mut alert)) => {
-                eprintln!("Error in handshake: {:?}", err);
+                debug!("Error in handshake: {:?}", err);
                 let mut out = Vec::new();
                 if let Err(write_err) = alert.write(&mut out) {
-                    eprintln!("Error writing alert: {:?}", write_err);
+                    debug!("Error writing alert: {:?}", write_err);
                 } else {
                     let _ = stream.write_all(&out);
                 }
@@ -98,10 +92,10 @@ fn handle_tls_client(
     let mut conn = match accepted.into_connection(server_config.into()) {
         Ok(conn) => conn,
         Err((err, mut alert)) => {
-            eprintln!("Error creating connection: {:?}", err);
+            debug!("Error creating connection: {:?}", err);
             let mut out = Vec::new();
             if let Err(write_err) = alert.write(&mut out) {
-                eprintln!("Error writing alert: {:?}", write_err);
+                debug!("Error writing alert: {:?}", write_err);
             } else {
                 let _ = stream.write_all(&out);
             }
@@ -117,9 +111,7 @@ fn handle_tls_client(
     // Close connection gracefully
     conn.send_close_notify();
     conn.write_tls(&mut stream)?;
-    conn.complete_io(&mut stream)?;
 
-    debug!("TLS connection handled successfully");
     Ok(())
 }
 
@@ -131,19 +123,17 @@ fn run_tls_server(server_config: ServerConfig) -> Result<(), Box<dyn std::error:
         match stream {
             Ok(stream) => {
                 if let Err(e) = handle_tls_client(stream, server_config.clone()) {
-                    eprintln!("Error handling TLS client: {:?}", e);
+                    debug!("Error handling TLS client: {:?}", e);
                 }
             }
             Err(e) => {
-                eprintln!("Error accepting connection: {:?}", e);
+                debug!("Error accepting connection: {:?}", e);
             }
         }
     }
 
     Ok(())
 }
-
-// DTLS Helper Functions
 
 fn send_dtls_response(
     socket: &UdpSocket,
@@ -169,7 +159,13 @@ fn handle_dtls_connection(
     buffer: &mut [u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (accepted, client_addr) = loop {
-        let (len, client_addr) = socket.recv_from(buffer)?;
+        let (len, client_addr) = match socket.recv_from(buffer) {
+            Ok(v) => v,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                return Ok(());
+            }
+            Err(e) => return Err(Box::new(e))
+        }; 
         debug!("Received {} bytes from {}", len, client_addr);
 
         acceptor.read_tls(&mut &buffer[..len])?;
@@ -178,10 +174,10 @@ fn handle_dtls_connection(
             Ok(Some(accepted)) => break (accepted, client_addr),
             Ok(None) => continue,
             Err((err, mut alert)) => {
-                eprintln!("Error in handshake: {:?}", err);
+                debug!("Error in handshake: {:?}", err);
                 let mut out = Vec::new();
                 if let Err(write_err) = alert.write(&mut out) {
-                    eprintln!("Error writing alert: {:?}", write_err);
+                    debug!("Error writing alert: {:?}", write_err);
                 } else {
                     let _ = socket.send_to(&out, client_addr);
                 }
@@ -193,10 +189,10 @@ fn handle_dtls_connection(
     let mut conn = match accepted.into_connection(server_config.into()) {
         Ok(conn) => conn,
         Err((err, mut alert)) => {
-            eprintln!("Error creating connection: {:?}", err);
+            debug!("Error creating connection: {:?}", err);
             let mut out = Vec::new();
             if let Err(write_err) = alert.write(&mut out) {
-                eprintln!("Error writing alert: {:?}", write_err);
+                debug!("Error writing alert: {:?}", write_err);
             } else {
                 let _ = socket.send_to(&out, client_addr);
             }
@@ -214,26 +210,71 @@ fn handle_dtls_connection(
             }
         }
 
-        let (len, addr) = socket.recv_from(buffer)?;
-        if addr != client_addr {
-            debug!("Ignoring datagram from different address");
-            continue;
+        match socket.recv_from(buffer){
+            Ok((len, addr)) =>{
+                if addr != client_addr {
+                    debug!("Addres missmatch");
+                    continue;
+                } 
+            conn.read_tls(&mut &buffer[..len])?;
+            conn.process_new_packets()?;
         }
-
-        debug!("Received {} bytes during handshake", len);
-        conn.read_tls(&mut &buffer[..len])?;
-        conn.process_new_packets()?;
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock =>{
+            conn.process_new_packets()?;
+        }    
+        Err(e) =>{
+            return Err(Box::new(e))
+        } 
+        } 
     }
 
     debug!("Handshake completed!");
 
+    while conn.wants_write() {
+        let mut out_buf = Vec::new();
+        conn.write_tls(&mut out_buf)?;
+        if !out_buf.is_empty() {
+            socket.send_to(&out_buf, client_addr)?;
+        }
+    }
+
+    let (len, addr) = socket.recv_from(buffer)?;
+    if addr == client_addr {
+        conn.read_tls(&mut &buffer[..len])?;
+        let io_state = conn.process_new_packets()?;
+        
+        if io_state.plaintext_bytes_to_read() > 0 {
+            let mut reader = conn.reader();
+            let mut msg = vec![0u8; io_state.plaintext_bytes_to_read()];
+            let n = reader.read(&mut msg)?;
+            println!("Client says: {:?}", String::from_utf8_lossy(&msg[..n]));
+        }
+    }
+
     send_dtls_response(socket, &mut conn, client_addr, DTLS_HTTP_RESPONSE)?;
 
+    while let Ok((len, addr)) = socket.recv_from(buffer) {
+        if addr == client_addr {
+            conn.read_tls(&mut &buffer[..len])?;
+            let io_state = conn.process_new_packets()?;
+            
+            if io_state.plaintext_bytes_to_read() > 0 {
+                let mut reader = conn.reader();
+                let mut msg = vec![0u8; io_state.plaintext_bytes_to_read()];
+                let n = reader.read(&mut msg)?;
+                println!("Client says: {:?}", String::from_utf8_lossy(&msg[..n]));
+            }
+        }
+    }
+    
     Ok(())
 }
 
 fn run_dtls_server(server_config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     let socket = UdpSocket::bind(format!("[::]:{}", SERVER_PORT))?;
+    socket.set_read_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
+    socket.set_write_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
+
     socket.set_nonblocking(false)?;
     println!("DTLS server listening on port {}", SERVER_PORT);
 
@@ -245,100 +286,91 @@ fn run_dtls_server(server_config: ServerConfig) -> Result<(), Box<dyn std::error
         if let Err(e) =
             handle_dtls_connection(&socket, acceptor, server_config.clone(), &mut buffer)
         {
-            eprintln!("Error handling DTLS connection: {:?}", e);
-            // Continue accepting new connections
-            continue;
+            debug!("Error handling DTLS connection: {:?}", e);
+            return Err(e);
         }
     }
 }
-
-fn parse_arguments() -> (Option<String>, String) {
-    let mut args = std::env::args();
-    args.next();
-
-    let mut group = None;
-    let mut authkem = None;
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-group" => {
-                group = args.next();
-                if group.is_none() {
-                    eprintln!("Error: -group requires a group name");
-                    std::process::exit(1);
-                }
-            }
-            "-authkem" => {
-                authkem = args.next();
-                if authkem.is_none() {
-                    eprintln!("Error: -authkem requires an algorithm name");
-                    std::process::exit(1);
-                }
-            }
-            _ => {
-                eprintln!("Error: Unknown argument '{}'", arg);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    let authkem = authkem.unwrap_or_else(|| "MLKEM768".to_string());
-    (group, authkem)
-}
-
 fn main() {
     env_logger::init();
 
     let use_dtls = cfg!(feature = "dtls13");
     if use_dtls {
-        debug!("Using DTLS 1.3");
+        println!("Using DTLS 1.3");
     }
 
-    let (group, authkem) = parse_arguments();
+    println!("Starting traditional server...");
+    let mut args = Args::parse();
 
-    debug!("Starting AuthKEM server...");
+    let mut root_store = RootCertStore::empty();
+    root_store.add_parsable_certificates(
+        CertificateDer::pem_file_iter(args.ca_file)
+            .expect("cannot open ca file")
+            .map(|result| result.unwrap()),
+    );
 
-    let kemalg = match get_kem_algorithm(&authkem) {
-        Ok(alg) => {
-            println!("Selected KEM for authentication: {}", alg);
-            alg
+    let cert = rustls::pki_types::CertificateDer::pem_file_iter(&args.cert_file)
+        .expect("Could not read certificate file")
+        .map(|cert| cert.expect("Error reading certificate"))
+        .collect();
+
+    let pk = rustls::pki_types::PrivateKeyDer::from_pem_file(&args.pk_file).expect("Could not read private key file");
+
+    let verifier = WebPkiClientVerifier::builder(root_store.into()).build().unwrap();
+    // Set up TLS server with AuthKEM provider
+    let crypto_provider = provider();
+
+    let mut server_config = match (args.pqc_provider, args.client_auth) {
+        (true, true) => {
+            ServerConfig::builder_with_provider(crypto_provider.into())
+                .with_safe_default_protocol_versions().unwrap()
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(cert, pk).unwrap()
         }
-        Err(e) => {
-            eprintln!("Error with authkem algorithm: {}", e);
-            std::process::exit(1);
+
+        (true, false) => {
+            ServerConfig::builder_with_provider(crypto_provider.into())
+                .with_safe_default_protocol_versions().unwrap()
+                .with_no_client_auth()
+                .with_single_cert(cert, pk).unwrap()
+        }
+
+        (false, true) => {
+            ServerConfig::builder()
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(cert, pk).unwrap()
+        }
+
+        (false, false) => {
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(cert, pk).unwrap()
         }
     };
 
-    let mut crypto_provider = provider();
+    server_config.key_log = Arc::new(rustls::KeyLogFile::new());
 
-    if let Some(ref group_name) = group {
-        println!("Selecting KX group: {}", group_name);
-        select_kx_group(&mut crypto_provider, group_name);
-    } else {
-        debug!("Using all available KX groups");
+    println!("Server config created successfully");
+    println!("Provider has {} kx_groups", server_config.crypto_provider().kx_groups.len());
+    for kx in &server_config.crypto_provider().kx_groups {
+        println!("  KX group: {:?}", kx.name());
     }
-
-    debug!("Provider has {} kx_groups", crypto_provider.kx_groups.len());
-    for kx in &crypto_provider.kx_groups {
-        debug!("  KX group: {:?}", kx.name());
-    }
-
-    let server_config = match create_server_config(kemalg, crypto_provider) {
-        Ok(config) => config,
-        Err(e) => {
-            eprintln!("Failed to create server config: {:?}", e);
-            std::process::exit(1);
-        }
-    };
 
     let result = if use_dtls {
+        println!("Setting max fragment size to: {}", args.max_fragment_length);
+        server_config.max_fragment_size = Some(args.max_fragment_length);
+
+        if let Some(cid_val) = args.cid {
+            println!("Offering CID: {}", cid_val);
+            server_config.set_cid(&[cid_val]);
+        }
         run_dtls_server(server_config)
     } else {
         run_tls_server(server_config)
     };
 
     if let Err(e) = result {
-        eprintln!("Server error: {:?}", e);
+        debug!("Server error: {:?}", e);
         std::process::exit(1);
     }
 }

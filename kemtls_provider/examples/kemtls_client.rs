@@ -18,7 +18,7 @@ const BUFFER_SIZE: usize = 4096;
 const TIMEOUT_SECS: u64 = 1;
 
 #[derive(Parser, Debug)]
-#[command(about = "Cliente KEMTLS/DTLS 1.3")]
+#[command(about = "KEMTLS/DTLS 1.3 Client")]
 struct ClientArgs {
     /// KX group to use (e.g. MLKEM768, BikeL3, Hqc192, NtruPrimeSntrup761)
     #[arg(short, long)]

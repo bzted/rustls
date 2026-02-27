@@ -8,16 +8,60 @@ use std::io::{stdout, Read, Write};
 use std::net::{TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
+use clap::Parser;
 
 const BUFFER_SIZE: usize = 4096;
 const TIMEOUT_SECS: u64 = 1;
-const SERVER_ADDR: &str = "127.0.0.1:8443";
 
 // DTLS Helper Functions
 
-fn setup_udp_socket() -> Result<UdpSocket, std::io::Error> {
+#[derive(Parser, Debug)]
+#[command(author, version, about = "KEMTLS/DTLS 1.3 Client")]
+struct Args {
+    /// KX group to use (e.g. MLKEM768, BikeL3, Hqc192, NtruPrimeSntrup761)
+    #[arg(long)]
+    group: Option<String>,
+
+    /// Optional CID value to offer in DTLS (0-255)
+    #[arg(long)]
+    cid: Option<u8>,
+
+    /// Maximum fragment length for DTLS
+    #[arg(short = 'L', default_value_t = 1400)]
+    max_fragment_length: usize,
+
+    /// Disables client authentication
+    #[arg(short = 'd', default_value_t = true, action = clap::ArgAction::SetFalse)]
+    client_auth: bool,
+
+    /// Certificate File
+    #[arg(short = 'c', default_value = "../test-ca/rsa-2048/client.fullchain")]
+    cert_file: String,
+
+    /// Key file
+    #[arg(short = 'k', default_value = "../test-ca/rsa-2048/client.key")]
+    pk_file: String,
+
+    /// Certificate Authority file
+    #[arg(short = 'A', default_value = "../test-ca/rsa-2048/ca.cert")]
+    ca_file: String,
+
+    /// Port to listen on 
+    #[arg(short, long, default_value_t = 8443)]
+    port: u16,
+
+    /// Address to connect to
+    #[arg(long, default_value = "127.0.0.1")]
+    addr: String,
+
+    /// Activates PQC provider
+    #[arg(short = 'q' ,long, default_value_t = false, action = clap::ArgAction::SetTrue)]
+    pqc_provider: bool,
+}
+
+fn setup_udp_socket(server_addr: &str) -> Result<UdpSocket, std::io::Error> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
-    socket.connect(SERVER_ADDR)?;
+    socket.connect(server_addr)?;
     socket.set_read_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
     socket.set_write_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
     Ok(socket)
@@ -138,15 +182,16 @@ fn receive_http_response(
 fn run_dtls_client(
     client_config: ClientConfig,
     server_name: rustls::pki_types::ServerName<'static>,
+    server_addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let socket = setup_udp_socket()?;
+    let socket = setup_udp_socket(server_addr)?;
     let mut conn = ClientConnection::new_dtls(Arc::new(client_config), server_name)?;
 
     // Perform DTLS handshake
     perform_dtls_handshake(&socket, &mut conn)?;
 
     // Send HTTP request
-    let request = b"GET / HTTP/1.1\r\nHost: example\r\nConnection: close\r\n\r\n";
+    let request = b"Hello from DTLS client!\n";
     send_http_request(&socket, &mut conn, request)?;
 
     // Receive and display response
@@ -162,10 +207,11 @@ fn run_dtls_client(
 fn run_tls_client(
     client_config: ClientConfig,
     server_name: rustls::pki_types::ServerName<'static>,
+    server_addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = ClientConnection::new(Arc::new(client_config), server_name)?;
-    debug!("Connecting to server at {}...", SERVER_ADDR);
-    let mut stream = TcpStream::connect(SERVER_ADDR)?;
+    debug!("Connecting to server at {}...", server_addr);
+    let mut stream = TcpStream::connect(server_addr)?;
     stream.set_nodelay(true)?;
 
     let mut tls_stream = rustls::Stream::new(&mut client, &mut stream);
@@ -207,48 +253,67 @@ fn main() {
         use_dtls = true;
     }
 
-    let mut max_fragment_length = None;
     let crypto_provider = provider();
 
-    let mut args = std::env::args();
-    args.next();
-    let ca_file = args.next().expect("no cert file");
-
-    let length_str = args.next();
-
-    if length_str.is_some() {
-        match length_str.unwrap().parse::<usize>() {
-                        Ok(val) => max_fragment_length = Some(val),
-                        Err(_) => {
-                            eprintln!("Error: -L must be a valid integer");
-                            std::process::exit(1);
-                        }
-        }
-    }
+    let args = Args::parse();
 
     let mut root_store = RootCertStore::empty();
     root_store.add_parsable_certificates(
-        CertificateDer::pem_file_iter(ca_file)
+        CertificateDer::pem_file_iter(args.ca_file)
             .expect("cannot open ca file")
             .map(|result| result.unwrap()),
     );
 
-    //let client_config = ClientConfig::builder_with_provider(crypto_provider.into())
-    //    .with_safe_default_protocol_versions()
-    //    .unwrap()
-    let mut client_config = ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+    let cert: Vec<CertificateDer<'static>> =
+        rustls::pki_types::CertificateDer::pem_file_iter(args.cert_file)
+            .unwrap()
+            .map(|cert| cert.unwrap())
+            .collect();
 
-    let server_name = "testserver.com".try_into().unwrap();
-    let result = if use_dtls {
-        if let Some(length) = max_fragment_length {
-            println!("Setting max fragment size to: {}", length);
-            client_config.max_fragment_size = Some(length);
+    let pk = rustls::pki_types::PrivateKeyDer::from_pem_file(args.pk_file).unwrap();
+
+    let mut client_config = match (args.pqc_provider, args.client_auth) {
+        (true, true) => {
+            ClientConfig::builder_with_provider(crypto_provider.into())
+                .with_safe_default_protocol_versions().unwrap()
+                .with_root_certificates(root_store)
+                .with_client_auth_cert(cert, pk).unwrap()
         }
-        run_dtls_client(client_config, server_name)
+
+        (true, false) => {
+            ClientConfig::builder_with_provider(crypto_provider.into())
+                .with_safe_default_protocol_versions().unwrap().
+                with_root_certificates(root_store)
+                .with_no_client_auth()
+        }
+
+        (false, true) => {
+            ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_client_auth_cert(cert, pk).unwrap()
+        }
+
+        (false, false) => {
+            ClientConfig::builder().
+            with_root_certificates(root_store)
+                .with_no_client_auth()
+        }
+    };
+
+    let server_addr = format!("{}:{}", args.addr, args.port);
+    let server_name = "testserver.com".try_into().unwrap();
+
+    let result = if use_dtls {
+        println!("Max fragment size set to: {}", args.max_fragment_length);
+        client_config.max_fragment_size = Some(args.max_fragment_length);
+
+        if let Some(cid_val) = args.cid {
+            println!("Offering CID: {}", cid_val);
+            client_config.set_cid(&[cid_val]);
+        }
+        run_dtls_client(client_config, server_name, &server_addr)
     } else {
-        run_tls_client(client_config, server_name)
+        run_tls_client(client_config, server_name, &server_addr)
     };
 
     if let Err(e) = result {
