@@ -1468,7 +1468,7 @@ impl State<ClientConnectionData> for ExpectServerKemEncapsulation {
 
         cx.common.check_aligned_handshake()?;
         let key_schedule_traffic = key_schedule_pre_finished.into_client_traffic(
-            hs_hash,
+            self.transcript.current_hash(),
             &*self.config.key_log,
             &self.randoms.client,
             Side::Client,
