@@ -99,7 +99,7 @@ cargo run --example kem_s --features dtls13 -- -group mlkem768 -authkem bikel3 -
 cargo run --example kem_c --features dtls13 -- -group mlkem768 -authkem bikel3 -port 8443  
 ```
 
-Traditional examples are also available. These example will use by default the certificates and keys available at the `test-ca` directory, but can be changed via -c and -k arguments. The -d argument disables client authentication. Futher information about all available arguments can be obtained by using --help.
+Traditional examples are also available. These example will use by default the certificates and keys available at the `test-ca` directory, but can be changed via -c, -k and -A arguments. The -d argument disables client authentication. Futher information about all available arguments can be obtained by using --help.
 
 To run the examples
 
@@ -108,13 +108,13 @@ To run the examples
 cargo run --example server -- -d -c "cert_file" -k "key_file"
 
 # Run the client example
-cargo run --example client -- -d
+cargo run --example client -- -d -A "ca_file"
 
 # To test mutual authentication, run:
 
-cargo run --example kem_s --features dtls13   
+cargo run --example kem_s --features dtls13 -c "cert_file" -k "key_file" -A "ca_file"  
 
-cargo run --example kem_c --features dtls13 
+cargo run --example kem_c --features dtls13 -c "cert_file" -k "key_file" -A "ca_file"
 ```
 
 The examples in the `kemtls_provider/examples` directory demonstrate how to configure the provider to use KEM-based flow instead of traditional TLS 1.3.
