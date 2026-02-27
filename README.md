@@ -6,27 +6,10 @@
 Rustls is a modern TLS library written in Rust.
 </p>
 
-# Status
+# Version 0.3.0: DTLS 1.3
 
-Rustls is used in production at many organizations and projects. We aim to maintain
-reasonable API surface stability but the API may evolve as we make changes to accommodate
-new features or performance improvements.
-
-We have a [roadmap](ROADMAP.md) for our future plans. We also have [benchmarks](BENCHMARKING.md) to
-prevent performance regressions and to let you evaluate rustls on your target hardware.
-
-If you'd like to help out, please see [CONTRIBUTING.md](CONTRIBUTING.md).
-
-[![Build Status](https://github.com/rustls/rustls/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/rustls/rustls/actions/workflows/build.yml?query=branch%3Amain)
-[![Coverage Status (codecov.io)](https://codecov.io/gh/rustls/rustls/branch/main/graph/badge.svg)](https://codecov.io/gh/rustls/rustls/)
-[![Documentation](https://docs.rs/rustls/badge.svg)](https://docs.rs/rustls/)
-[![Chat](https://img.shields.io/discord/976380008299917365?logo=discord)](https://discord.gg/MCSB76RU96)
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/9034/badge)](https://www.bestpractices.dev/projects/9034)
-
-## Changelog
-
-The detailed list of changes in each release can be found at
-https://github.com/rustls/rustls/releases.
+This new version includes a DTLS 1.3 implementation in rustls, according to [RFC9147](https://datatracker.ietf.org/doc/html/rfc9147).
+It has been tested against Wolfssl for interoperability.
 
 # Documentation
 
@@ -43,7 +26,7 @@ list of protocol features](https://docs.rs/rustls/latest/rustls/manual/_04_featu
 
 # KEM-based TLS Implementation
 
-This fork implements a new TLS flow based on the IETF draft [draft-celi-wiggers-tls-authkem/05](https://datatracker.ietf.org/doc/draft-celi-wiggers-tls-authkem/05/) that uses Key Encapsulation Mechanisms (KEMs) instead of traditional signatures for authentication. The implementation introduces new handshake messages as defined in this draft to support KEM-based authentication.
+This fork implements a new TLS flow based on the IETF draft [draft-celi-wiggers-tls-authkem/06](https://datatracker.ietf.org/doc/draft-celi-wiggers-tls-authkem/06/) that uses Key Encapsulation Mechanisms (KEMs) instead of traditional signatures for authentication. The implementation introduces new handshake messages as defined in this draft to support KEM-based authentication.
 
 # Features
 
@@ -81,24 +64,57 @@ To run the examples
 
 ```
 # Run the server example
-cargo run --example server -- -group mlkem768 -authkem bikel3
+cargo run --example kem_c -- -group mlkem768 -authkem bikel3
 
 # Run the client example
-cargo run --example client -- -group mlkem768 -authkem bikel3
+cargo run --example kem_c -- -group mlkem768 -authkem bikel3
 
 # To test mutual authentication, run:
-cargo run --example server_full -- -group mlkem768 -authkem bikel3
+cargo run --example kem_c -- -group mlkem768 -authkem bikel3
 
-cargo run --example client_auth -- -group mlkem768 -authkem bikel3
+cargo run --example kem_c -- -group mlkem768 -authkem bikel3
 ```
 
-For additional debuggin information, you can enable verbose logging:
+For additional debugging information, you can enable verbose logging:
 ```
 # Run the server example
-RUST_LOG=debug cargo run --example server -- -group mlkem768 -authkem bikel3
+RUST_LOG=debug cargo run --example kem_s -- -group mlkem768 -authkem bikel3
 
 # Run the client example
-RUST_LOG=debug cargo run --example client -- -group mlkem768 -authkem bikel3
+RUST_LOG=debug cargo run --example kem_c -- -group mlkem768 -authkem bikel3
+```
+
+To run DTLS examples
+
+```
+# Run the server example
+cargo run --example kem_c --features dtls13 -- -group mlkem768 -authkem bikel3 -port 8443 -d 
+
+# Run the client example
+cargo run --example kem_c --features dtls13 -- -group mlkem768 -authkem bikel3 -port 8443 -d 
+
+# To test mutual authentication, run:
+cargo run --example kem_s --features dtls13 -- -group mlkem768 -authkem bikel3 -port 8443  
+
+cargo run --example kem_c --features dtls13 -- -group mlkem768 -authkem bikel3 -port 8443  
+```
+
+Traditional examples are also available. These example will use by default the certificates and keys available at the `test-ca` directory, but can be changed via -c and -k arguments. The -d argument disables client authentication. Futher information about all available arguments can be obtained by using --help.
+
+To run the examples
+
+```
+# Run the server example
+cargo run --example server -- -d -c "cert_file" -k "key_file"
+
+# Run the client example
+cargo run --example client -- -d
+
+# To test mutual authentication, run:
+
+cargo run --example kem_s --features dtls13   
+
+cargo run --example kem_c --features dtls13 
 ```
 
 The examples in the `kemtls_provider/examples` directory demonstrate how to configure the provider to use KEM-based flow instead of traditional TLS 1.3.
