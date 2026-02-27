@@ -26,7 +26,7 @@ const DTLS_HTTP_RESPONSE: &[u8] =
     b"Hello World, I'm using DTLS 1.3!";
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Descripción de tu aplicación", long_about = None)]
+#[command(author, version, about = "Server with TLS 1.3 and DTLS 1.3 support", long_about = None)]
 struct Args {
     /// KX group to use (e.g. MLKEM768, BikeL3, Hqc192, NtruPrimeSntrup761)
     #[arg(long)]
