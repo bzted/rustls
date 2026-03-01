@@ -15,7 +15,6 @@ use std::time::Duration;
 use clap::Parser;
 
 const BUFFER_SIZE: usize = 4096;
-const SERVER_PORT: u16 = 8443;
 const TIMEOUT_SECS: u64 = 1;
 const HTTP_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\n\
                                 Connection: closed\r\n\
@@ -115,9 +114,9 @@ fn handle_tls_client(
     Ok(())
 }
 
-fn run_tls_server(server_config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let listener = TcpListener::bind(format!("[::]:{}", SERVER_PORT))?;
-    println!("TLS server listening on port {}", SERVER_PORT);
+fn run_tls_server(server_config: ServerConfig, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind(format!("[::]:{}", port))?;
+    println!("TLS server listening on port {}", port);
 
     for stream in listener.incoming() {
         match stream {
@@ -270,13 +269,13 @@ fn handle_dtls_connection(
     Ok(())
 }
 
-fn run_dtls_server(server_config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let socket = UdpSocket::bind(format!("[::]:{}", SERVER_PORT))?;
+fn run_dtls_server(server_config: ServerConfig, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let socket = UdpSocket::bind(format!("[::]:{}", port))?;
     socket.set_read_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
     socket.set_write_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
 
     socket.set_nonblocking(false)?;
-    println!("DTLS server listening on port {}", SERVER_PORT);
+    println!("DTLS server listening on port {}", port);
 
     let mut buffer = [0u8; BUFFER_SIZE];
 
@@ -364,9 +363,9 @@ fn main() {
             println!("Offering CID: {}", cid_val);
             server_config.set_cid(&[cid_val]);
         }
-        run_dtls_server(server_config)
+        run_dtls_server(server_config, args.port)
     } else {
-        run_tls_server(server_config)
+            run_tls_server(server_config, args.port)
     };
 
     if let Err(e) = result {

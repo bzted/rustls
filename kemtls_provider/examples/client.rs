@@ -282,8 +282,8 @@ fn main() {
 
         (true, false) => {
             ClientConfig::builder_with_provider(crypto_provider.into())
-                .with_safe_default_protocol_versions().unwrap().
-                with_root_certificates(root_store)
+                .with_safe_default_protocol_versions().unwrap()
+                .with_root_certificates(root_store)
                 .with_no_client_auth()
         }
 
@@ -294,8 +294,8 @@ fn main() {
         }
 
         (false, false) => {
-            ClientConfig::builder().
-            with_root_certificates(root_store)
+            ClientConfig::builder()
+                .with_root_certificates(root_store)
                 .with_no_client_auth()
         }
     };
