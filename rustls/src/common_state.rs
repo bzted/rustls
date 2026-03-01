@@ -738,6 +738,10 @@ impl CommonState {
     }
 
     pub(crate) fn send_dtls_ack(&mut self) {
+        if !self.is_dtls() {
+            return;
+        }
+        
         let ack = self.record_layer.generate_ack_message();
         let mut buf = Vec::new();
         ack.encode(&mut buf);

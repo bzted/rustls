@@ -409,6 +409,7 @@ mod test_raw_keys {
             typ: ContentType::Handshake,
             version: ProtocolVersion::TLSv1_3,
             payload: OutboundChunks::Single(encoded.bytes()),
+            dtls_params: None,
         };
         Altered::Raw(
             encrypter
