@@ -96,6 +96,10 @@ fn create_server_config(
 
     server_config.key_log = Arc::new(rustls::KeyLogFile::new());
 
+    // Disable session resumption for testing purposes
+    server_config.send_tls13_tickets = 0;
+    server_config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+
     println!("Server config created successfully");
     Ok(server_config)
 }
@@ -206,7 +210,10 @@ fn handle_dtls_connection(
             Err(e) => return Err(Box::new(e))
         }; 
 
-        acceptor.read_tls(&mut &buffer[..len])?;
+        let mut slice = &buffer[..len];
+        while !slice.is_empty() {
+            acceptor.read_tls(&mut slice)?;
+        }
 
         match acceptor.accept() {
             Ok(Some(accepted)) => break (accepted, client_addr),
@@ -253,7 +260,10 @@ fn handle_dtls_connection(
                     debug!("Addres missmatch");
                     continue;
                 } 
-                conn.read_tls(&mut &buffer[..len])?;
+                let mut slice = &buffer[..len];
+                while !slice.is_empty() {
+                    conn.read_tls(&mut slice)?;
+                }
                 conn.process_new_packets()?;
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock =>{
@@ -279,8 +289,17 @@ fn handle_dtls_connection(
         match socket.recv_from(buffer) {
             Ok((len, addr)) => {
                 if addr != client_addr { continue; }
+
+                let mut slice = &buffer[..len];
+                let mut read_err = None;
+                while !slice.is_empty() {
+                    if let Err(e) = conn.read_tls(&mut slice) {
+                        read_err = Some(e);
+                        break;
+                    }
+                }
                 
-                if let Err(e) = conn.read_tls(&mut &buffer[..len]) {
+                if let Some(e) = read_err {
                     debug!("Error de lectura TLS: {:?}", e);
                     continue;
                 }

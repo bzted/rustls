@@ -167,7 +167,10 @@ fn handle_dtls_connection(
         }; 
         debug!("Received {} bytes from {}", len, client_addr);
 
-        acceptor.read_tls(&mut &buffer[..len])?;
+        let mut slice = &buffer[..len];
+        while !slice.is_empty() {
+            acceptor.read_tls(&mut slice)?;
+        }
 
         match acceptor.accept() {
             Ok(Some(accepted)) => break (accepted, client_addr),
@@ -215,15 +218,18 @@ fn handle_dtls_connection(
                     debug!("Addres missmatch");
                     continue;
                 } 
-            conn.read_tls(&mut &buffer[..len])?;
-            conn.process_new_packets()?;
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock =>{
-            conn.process_new_packets()?;
-        }    
-        Err(e) =>{
-            return Err(Box::new(e))
-        } 
+                let mut slice = &buffer[..len];
+                while !slice.is_empty() {
+                    conn.read_tls(&mut slice)?;
+                }
+                conn.process_new_packets()?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock =>{
+                conn.process_new_packets()?;
+            }    
+            Err(e) =>{
+                return Err(Box::new(e))
+            } 
         } 
     }
 
@@ -239,7 +245,10 @@ fn handle_dtls_connection(
 
     let (len, addr) = socket.recv_from(buffer)?;
     if addr == client_addr {
-        conn.read_tls(&mut &buffer[..len])?;
+        let mut slice = &buffer[..len];
+        while !slice.is_empty() {
+            conn.read_tls(&mut slice)?;
+        }
         let io_state = conn.process_new_packets()?;
         
         if io_state.plaintext_bytes_to_read() > 0 {
@@ -254,7 +263,10 @@ fn handle_dtls_connection(
 
     while let Ok((len, addr)) = socket.recv_from(buffer) {
         if addr == client_addr {
-            conn.read_tls(&mut &buffer[..len])?;
+            let mut slice = &buffer[..len];
+            while !slice.is_empty() {
+                conn.read_tls(&mut slice)?;
+            }
             let io_state = conn.process_new_packets()?;
             
             if io_state.plaintext_bytes_to_read() > 0 {
@@ -348,6 +360,10 @@ fn main() {
     };
 
     server_config.key_log = Arc::new(rustls::KeyLogFile::new());
+
+    // Disable session resumption for testing purposes
+    server_config.send_tls13_tickets = 0;
+    server_config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
 
     println!("Server config created successfully");
     println!("Provider has {} kx_groups", server_config.crypto_provider().kx_groups.len());

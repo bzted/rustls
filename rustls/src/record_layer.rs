@@ -63,6 +63,8 @@ impl RecordLayer {
         if self.decrypt_state != DirectionState::Active {
             return Ok(Some(Decrypted {
                 want_close_before_decrypt: false,
+                is_replayed: false,
+                must_retransmit_after_ack: false,
                 plaintext: encr.into_plain_message(),
             }));
         }
@@ -89,6 +91,8 @@ impl RecordLayer {
                 }
                 Ok(Some(Decrypted {
                     want_close_before_decrypt,
+                    is_replayed: false,
+                    must_retransmit_after_ack: false,
                     plaintext,
                 }))
             }
@@ -113,6 +117,8 @@ impl RecordLayer {
         if self.decrypt_state != DirectionState::Active {
             return Ok(Some(Decrypted {
                 want_close_before_decrypt: false,
+                is_replayed: false,
+                must_retransmit_after_ack: false,
                 plaintext: encr.into_plain_message(),
             }));
         }
@@ -126,6 +132,8 @@ impl RecordLayer {
                 }
                 Ok(Some(Decrypted {
                     want_close_before_decrypt: false,
+                    is_replayed: false,
+                    must_retransmit_after_ack: false,
                     plaintext,
                 }))
             }
@@ -285,6 +293,10 @@ impl RecordLayer {
 pub(crate) struct Decrypted<'a> {
     /// Whether the peer appears to be getting close to encrypting too many messages with this key.
     pub(crate) want_close_before_decrypt: bool,
+    /// Whether this message appears to be a replay of a previously seen message.
+    pub(crate) is_replayed: bool,
+    /// Whether this messsage appears to be an Ack containing new acked records, causing a retransmission of pending messages.
+    pub(crate) must_retransmit_after_ack: bool,
     /// The decrypted message.
     pub(crate) plaintext: InboundPlainMessage<'a>,
 }

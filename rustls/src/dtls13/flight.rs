@@ -72,11 +72,10 @@ impl FlightTracker {
         self.timer.start();
     }
 
-    pub(crate) fn process_ack_payload(&mut self, ack_data: &[u8]) -> Result<(), Error> {
+    pub(crate) fn process_ack_payload(&mut self, ack_data: &[u8]) -> Result<bool, Error> {
         let ack = AckMessage::from_record_data(ack_data)?;
         debug!("Received ACK: {:?}", ack);
-        self.on_ack_records(&ack.to_records());
-        Ok(())
+        Ok(self.on_ack_records(&ack.to_records()))
     }
 
     pub(crate) fn record_received(&mut self, epoch: u16, seq: u64) {
@@ -109,36 +108,50 @@ impl FlightTracker {
         Some(&flight.datagrams)
     }
 
-    pub(crate) fn on_ack_records(&mut self, acked_records: &[(u16, u64)]) {
+    pub(crate) fn on_ack_records(&mut self, acked_records: &[(u16, u64)]) -> bool {
         let flight = match self.current.as_mut() {
             Some(f) => f,
             None => {
                 debug!("Received ACK but no current flight to clear");
-                return;
+                return false;
             }
         };
 
-        // Remove acked records from retransmission set
-        let mut i = 0;
-        while i < flight.record_numbers.len() {
-            let (rec_epoch, num) = flight.record_numbers[i];
-            
-            let is_acked = acked_records.iter().any(|&(ack_epoch, ack_seq)| {
-                rec_epoch == ack_epoch && num == ack_seq
-            });
+        let acked: HashSet<(u16, u64)> = acked_records.iter().copied().collect();
+        let before = flight.record_numbers.len();
 
-            if is_acked {
-                flight.record_numbers.remove(i);
-                flight.datagrams.remove(i); 
-            } else {
-                i += 1;
+        let mut new_record_numbers = Vec::with_capacity(flight.record_numbers.len());
+        let mut new_datagrams = Vec::with_capacity(flight.datagrams.len());
+
+        // Remove acked records from set
+        for (rec, dgram) in flight
+            .record_numbers
+            .iter()
+            .copied()
+            .zip(flight.datagrams.iter().cloned())
+        {
+            if !acked.contains(&rec) {
+                new_record_numbers.push(rec);
+                new_datagrams.push(dgram);
             }
         }
 
-        debug!("Pending records for retransmission after processing peer ACK: {:?}", flight.record_numbers);
+        flight.record_numbers = new_record_numbers;
+        flight.datagrams = new_datagrams;
+
+    let changed = flight.record_numbers.len() != before;
+
+        if changed {
+            debug!("Pending records for retransmission after processing peer ACK: {:?}", flight.record_numbers);
+        } else {
+            debug!("No matching records found in ACK for pending retransmission");
+        }
+
         if flight.record_numbers.is_empty() {
             self.finish();
         } 
+
+        changed
     }
 
     pub(crate) fn finish(&mut self) {
