@@ -91,7 +91,10 @@ fn receive_dtls_datagram(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match socket.recv(buffer){
         Ok(n) =>{
-            conn.read_tls(&mut &buffer[..n])?;
+            let mut slice = &buffer[..n];
+            while !slice.is_empty() {
+                conn.read_tls(&mut slice)?;
+            }
             conn.process_new_packets()?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock =>{
@@ -300,6 +303,9 @@ fn main() {
         }
     };
 
+    // Disable session resumption for testing purposes
+    client_config.resumption = rustls::client::Resumption::disabled();
+    
     let server_addr = format!("{}:{}", args.addr, args.port);
     let server_name = "testserver.com".try_into().unwrap();
 
