@@ -64,13 +64,13 @@ To run the examples
 
 ```
 # Run the server example
-cargo run --example kem_c -- -group mlkem768 -authkem bikel3
+cargo run --example kem_s -- -group mlkem768 -authkem bikel3
 
 # Run the client example
 cargo run --example kem_c -- -group mlkem768 -authkem bikel3
 
 # To test mutual authentication, run:
-cargo run --example kem_c -- -group mlkem768 -authkem bikel3
+cargo run --example kem_s -- -group mlkem768 -authkem bikel3
 
 cargo run --example kem_c -- -group mlkem768 -authkem bikel3
 ```
@@ -88,7 +88,7 @@ To run DTLS examples
 
 ```
 # Run the server example
-cargo run --example kem_c --features dtls13 -- -group mlkem768 -authkem bikel3 -port 8443 -d 
+cargo run --example kem_s --features dtls13 -- -group mlkem768 -authkem bikel3 -port 8443 -d 
 
 # Run the client example
 cargo run --example kem_c --features dtls13 -- -group mlkem768 -authkem bikel3 -port 8443 -d 
