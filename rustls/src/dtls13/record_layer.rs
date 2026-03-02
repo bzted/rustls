@@ -139,9 +139,16 @@ impl DtlsRecordLayer {
 
         if let Some(ref d) = dec {
             if d.plaintext.typ == ContentType::Ack {
-                self.flight_tracker
+                let ack_changed = self.flight_tracker
                     .process_ack_payload(d.plaintext.payload)?;
-                return Ok(dec);
+
+                let ack = dec.map(|d| Decrypted {
+                    want_close_before_decrypt: d.want_close_before_decrypt,
+                    is_replayed: false,
+                    must_retransmit_after_ack: ack_changed,
+                    plaintext: d.plaintext,
+                });
+                return Ok(ack);
             }
         }
 
@@ -150,7 +157,14 @@ impl DtlsRecordLayer {
                 "Dropping replayed or out of window message with seq: {} ",
                 seq
             );
-            return Ok(None);
+            let replayed_record = dec.map(|d| Decrypted {
+                want_close_before_decrypt: d.want_close_before_decrypt,
+                is_replayed: true,
+                must_retransmit_after_ack: d.must_retransmit_after_ack,
+                plaintext: d.plaintext,
+            });
+
+            return Ok(replayed_record);
         }
 
         if let Some(ref _d) = dec {

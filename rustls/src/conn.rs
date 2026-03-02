@@ -1070,12 +1070,21 @@ impl<Data> ConnectionCore<Data> {
                 };
 
                 if message.plaintext.typ == ContentType::Ack {
-                    self.common_state.dtls_retransmit();
+                    if message.must_retransmit_after_ack {
+                        self.common_state.dtls_retransmit();
+                    }
+                    continue;
+                }
+
+                if message.is_replayed {
+                    self.common_state.send_dtls_ack();
                     continue;
                 }
 
                 let Decrypted {
                     want_close_before_decrypt,
+                    is_replayed,
+                    must_retransmit_after_ack: _,
                     plaintext,
                 } = message;
 
