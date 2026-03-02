@@ -108,7 +108,10 @@ fn receive_dtls_datagram(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match socket.recv(buffer){
         Ok(n) =>{
-            conn.read_tls(&mut &buffer[..n])?;
+            let mut slice = &buffer[..n];
+            while !slice.is_empty() {
+                conn.read_tls(&mut slice)?;
+            }
             conn.process_new_packets()?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock =>{
@@ -132,7 +135,10 @@ fn perform_dtls_handshake(
 
         match socket.recv(&mut in_buf) {
             Ok(n) => {
-                conn.read_tls(&mut &in_buf[..n])?;
+                let mut slice = &in_buf[..n];
+                while !slice.is_empty() {
+                    conn.read_tls(&mut slice)?;
+                }
                 conn.process_new_packets()?;
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -164,28 +170,21 @@ fn receive_http_response(
     
     loop {
         let mut tmp = [0u8; BUFFER_SIZE];
-        // Try to read already decrypted data
         {
             let mut reader = conn.reader();
             match reader.read(&mut tmp) {
-                Ok(0) => {
-                    // No data available yet
-                }
+                Ok(0) => {}
                 Ok(n) => {
                     plaintext.extend_from_slice(&tmp[..n]);
-                    // Continue reading if there might be more data
                     if plaintext.len() > 0 && n < BUFFER_SIZE {
                         break;
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // No data ready, need to receive more datagrams
-                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(e) => return Err(Box::new(e)),
             }
         }
 
-        // Receive more datagrams if needed
         if plaintext.is_empty() {
             receive_dtls_datagram(socket, conn, &mut in_buf)?;
         } else {
@@ -204,14 +203,11 @@ fn run_dtls_client(
     let socket = setup_udp_socket(server_addr)?;
     let mut conn = ClientConnection::new_dtls(Arc::new(client_config), server_name)?;
 
-    // Perform DTLS handshake
     perform_dtls_handshake(&socket, &mut conn)?;
 
-    // Send HTTP request
     let request = b"Hello from DTLS client\n";
     send_http_request(&socket, &mut conn, request)?;
 
-    // Receive and display response
     let response = receive_http_response(&socket, &mut conn)?;
 
     println!("Response received:");
@@ -323,7 +319,10 @@ fn main() {
             .with_custom_certificate_verifier(server_verifier)
             .with_no_client_auth()
     };
-    
+
+    // Disable session resumption for testing purposes
+    client_config.resumption = rustls::client::Resumption::disabled();
+
     let server_addr = format!("{}:{}", args.addr, args.port);
     let server_name = "servername".try_into().unwrap();
 
