@@ -775,6 +775,18 @@ impl<Data> ConnectionCommon<Data> {
     pub fn write_tls(&mut self, wr: &mut dyn io::Write) -> Result<usize, io::Error> {
         self.sendable_tls.write_to(wr)
     }
+
+    /// Writes DTLS messages to `wr`.
+    pub fn write_dtls(&mut self, wr: &mut dyn io::Write) -> io::Result<usize> {
+        let first_chunk = match self.sendable_tls.chunk() {
+            Some(chunk) => chunk,
+            None => return Ok(0),
+        };
+        let used = wr.write(first_chunk)?;
+
+        self.sendable_tls.consume_first_chunk(used);
+        Ok(used)
+    }
 }
 
 impl<'a, Data> From<&'a mut ConnectionCommon<Data>> for Context<'a, Data> {
