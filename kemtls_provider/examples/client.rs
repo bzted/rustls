@@ -72,14 +72,15 @@ fn send_dtls_datagram(
     conn: &mut ClientConnection,
 ) -> Result<(), std::io::Error> {
     while conn.wants_write() {
-        let mut out = Vec::new();
-        conn.write_tls(&mut out)?;
-        if !out.is_empty() {
-            debug!("Sending DTLS datagram of {} bytes", out.len());
-            socket.send(&out)?;
-        } else {
-            break;
-        }
+            let mut out_buf = Vec::new();
+            match conn.write_dtls(&mut out_buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    debug!("DTLS datagram len = {} bytes", n);
+                    socket.send(&out_buf)?;
+                }
+                Err(e) => return Err(e),
+            }
     }
     Ok(())
 }
@@ -149,29 +150,21 @@ fn receive_http_response(
     let mut tmp = [0u8; BUFFER_SIZE];
 
     loop {
-        // Try to read already decrypted data
         {
             let mut reader = conn.reader();
             match reader.read(&mut tmp) {
-                Ok(0) => {
-                    // No data available yet
-                }
+                Ok(0) => {}
                 Ok(n) => {
                     plaintext.extend_from_slice(&tmp[..n]);
-                    debug!("Read {} bytes of plaintext", n);
-                    // Continue reading if there might be more data
                     if plaintext.len() > 0 && n < BUFFER_SIZE {
                         break;
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // No data ready, need to receive more datagrams
-                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(e) => return Err(Box::new(e)),
             }
         }
 
-        // Receive more datagrams if needed
         if plaintext.is_empty() {
             receive_dtls_datagram(socket, conn, &mut in_buf)?;
         } else {
@@ -190,14 +183,11 @@ fn run_dtls_client(
     let socket = setup_udp_socket(server_addr)?;
     let mut conn = ClientConnection::new_dtls(Arc::new(client_config), server_name)?;
 
-    // Perform DTLS handshake
     perform_dtls_handshake(&socket, &mut conn)?;
 
-    // Send HTTP request
     let request = b"Hello from DTLS client!\n";
     send_http_request(&socket, &mut conn, request)?;
 
-    // Receive and display response
     println!("Waiting for response...");
     let response = receive_http_response(&socket, &mut conn)?;
 
