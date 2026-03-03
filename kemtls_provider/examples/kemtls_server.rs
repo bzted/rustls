@@ -191,7 +191,17 @@ fn send_dtls_response(
     conn.writer().write_all(response)?;
 
     let mut out_buf = Vec::new();
-    conn.write_tls(&mut out_buf)?;
+    
+    while conn.wants_write() {
+        match conn.write_dtls(&mut out_buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                println!("DTLS datagram len = {} bytes", n);
+                socket.send_to(&out_buf, client_addr)?;
+            }
+            Err(e) => return Err(Box::new(e)),
+        }
+    }
 
     socket.send_to(&out_buf, client_addr)?;
     debug!("Response sent to client {}", client_addr);
@@ -252,9 +262,14 @@ fn handle_dtls_connection(
     while conn.is_handshaking() {
         while conn.wants_write() {
             let mut out_buf = Vec::new();
-            conn.write_tls(&mut out_buf)?;
-            if !out_buf.is_empty() {
-                socket.send_to(&out_buf, client_addr)?;
+
+            match conn.write_dtls(&mut out_buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    println!("DTLS datagram len = {} bytes", n);
+                    socket.send_to(&out_buf, client_addr)?;
+                }
+                Err(e) => return Err(Box::new(e)),
             }
         }
 
@@ -284,9 +299,14 @@ fn handle_dtls_connection(
     loop {
         while conn.wants_write() {
             let mut out_buf = Vec::new();
-            conn.write_tls(&mut out_buf)?;
-            if !out_buf.is_empty() {
-                socket.send_to(&out_buf, client_addr)?;
+
+            match conn.write_dtls(&mut out_buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    println!("DTLS datagram len = {} bytes", n);
+                    socket.send_to(&out_buf, client_addr)?;
+                }
+                Err(e) => return Err(Box::new(e)),
             }
         }
 

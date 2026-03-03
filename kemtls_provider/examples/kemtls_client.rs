@@ -90,13 +90,15 @@ fn send_dtls_datagram(
     conn: &mut ClientConnection,
 ) -> Result<(), std::io::Error> {
     while conn.wants_write() {
-        let mut out = Vec::new();
-        conn.write_tls(&mut out)?;
-        if !out.is_empty() {
-            socket.send(&out)?;
-        } else {
-            break;
-        }
+            let mut out_buf = Vec::new();
+            match conn.write_dtls(&mut out_buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    println!("DTLS datagram len = {} bytes", n);
+                    socket.send(&out_buf)?;
+                }
+                Err(e) => return Err(e),
+            }
     }
     Ok(())
 }
