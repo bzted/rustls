@@ -196,7 +196,7 @@ fn send_dtls_response(
         match conn.write_dtls(&mut out_buf) {
             Ok(0) => break,
             Ok(n) => {
-                println!("DTLS datagram len = {} bytes", n);
+                debug!("DTLS datagram len = {} bytes", n);
                 socket.send_to(&out_buf, client_addr)?;
             }
             Err(e) => return Err(Box::new(e)),
@@ -266,7 +266,7 @@ fn handle_dtls_connection(
             match conn.write_dtls(&mut out_buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    println!("DTLS datagram len = {} bytes", n);
+                    debug!("DTLS datagram len = {} bytes", n);
                     socket.send_to(&out_buf, client_addr)?;
                 }
                 Err(e) => return Err(Box::new(e)),
@@ -303,7 +303,7 @@ fn handle_dtls_connection(
             match conn.write_dtls(&mut out_buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    println!("DTLS datagram len = {} bytes", n);
+                    debug!("DTLS datagram len = {} bytes", n);
                     socket.send_to(&out_buf, client_addr)?;
                 }
                 Err(e) => return Err(Box::new(e)),

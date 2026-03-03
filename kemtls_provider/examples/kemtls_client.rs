@@ -94,7 +94,7 @@ fn send_dtls_datagram(
             match conn.write_dtls(&mut out_buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    println!("DTLS datagram len = {} bytes", n);
+                    debug!("DTLS datagram len = {} bytes", n);
                     socket.send(&out_buf)?;
                 }
                 Err(e) => return Err(e),
