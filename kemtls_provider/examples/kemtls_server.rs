@@ -44,6 +44,10 @@ struct ServerArgs {
     /// Port to listen on 
     #[arg(short, long, default_value_t = 8443)]
     port: u16,
+
+    /// Address to bind to
+    #[arg(long, default_value = "127.0.0.1")]
+    addr: String,
 }
 
 fn get_kem_algorithm(algorithm: &str) -> Result<oqs::kem::Algorithm, String> {
@@ -156,8 +160,8 @@ fn handle_tls_client(
     Ok(())
 }
 
-fn run_tls_server(server_config: ServerConfig, port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let listener = TcpListener::bind(format!("[::]:{}", port))?;
+fn run_tls_server(server_config: ServerConfig, addr: String, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind(format!("{}:{}", addr, port))?;
     println!("TLS server listening on port {}", port);
 
     for stream in listener.incoming() {
@@ -327,13 +331,13 @@ fn handle_dtls_connection(
     }
 }
 
-fn run_dtls_server(server_config: ServerConfig, port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let socket = UdpSocket::bind(format!("[::]:{}", port))?;
+fn run_dtls_server(server_config: ServerConfig, addr: String, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let socket = UdpSocket::bind(format!("{}:{}", addr, port))?;
     socket.set_read_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
     socket.set_write_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
 
     socket.set_nonblocking(true)?;
-    println!("DTLS server listening on port {}", port);
+    println!("DTLS server listening on {}:{}", addr, port);
 
     let mut buffer = [0u8; BUFFER_SIZE];
 
@@ -403,9 +407,9 @@ fn main() {
             server_config.set_cid(&[cid_val]);
         }
 
-        run_dtls_server(server_config, args.port)
+        run_dtls_server(server_config, args.addr, args.port)
     } else {
-        run_tls_server(server_config, args.port)
+        run_tls_server(server_config, args.addr,args.port)
     };
 
     if let Err(e) = result {
