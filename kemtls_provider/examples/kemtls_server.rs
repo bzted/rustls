@@ -48,6 +48,10 @@ struct ServerArgs {
     /// Address to bind to
     #[arg(long, default_value = "127.0.0.1")]
     addr: String,
+
+    /// Payload bytes to send after handshake
+    #[arg(short = 'B', long, default_value = "1000")]
+    payload_size: usize,
 }
 
 fn get_kem_algorithm(algorithm: &str) -> Result<oqs::kem::Algorithm, String> {
@@ -186,13 +190,20 @@ fn send_dtls_response(
     socket: &UdpSocket,
     conn: &mut ServerConnection,
     client_addr: SocketAddr,
-    response: &[u8],
+    payload_size: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    conn.writer().write_all(response)?;
+    use std::fs::File;
+    use std::io::Read;
 
-    let mut out_buf = Vec::new();
+    let mut file = File::open("/dev/zero")?;
+    let mut buffer = vec![0u8; payload_size];
+    file.read_exact(&mut buffer)?;
+
+    conn.writer().write_all(&buffer)?;
+
     
     while conn.wants_write() {
+        let mut out_buf = Vec::new();
         match conn.write_dtls(&mut out_buf) {
             Ok(0) => break,
             Ok(n) => {
@@ -203,7 +214,6 @@ fn send_dtls_response(
         }
     }
 
-    socket.send_to(&out_buf, client_addr)?;
     debug!("Response sent to client {}", client_addr);
 
     Ok(())
@@ -214,6 +224,7 @@ fn handle_dtls_connection(
     mut acceptor: Acceptor,
     server_config: ServerConfig,
     buffer: &mut [u8],
+    payload_size: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (accepted, client_addr) = loop {
         let (len, client_addr) = match socket.recv_from(buffer) {
@@ -296,6 +307,7 @@ fn handle_dtls_connection(
 
     println!("Handshake completed!");
 
+    let mut response_sent = false;
     loop {
         while conn.wants_write() {
             let mut out_buf = Vec::new();
@@ -315,17 +327,8 @@ fn handle_dtls_connection(
                 if addr != client_addr { continue; }
 
                 let mut slice = &buffer[..len];
-                let mut read_err = None;
                 while !slice.is_empty() {
-                    if let Err(e) = conn.read_tls(&mut slice) {
-                        read_err = Some(e);
-                        break;
-                    }
-                }
-                
-                if let Some(e) = read_err {
-                    debug!("Error de lectura TLS: {:?}", e);
-                    continue;
+                    conn.read_tls(&mut slice)?;
                 }
                 
                 match conn.process_new_packets() {
@@ -336,14 +339,19 @@ fn handle_dtls_connection(
                             reader.read_exact(&mut msg)?;
                             println!("Client says: {:?}", String::from_utf8_lossy(&msg));
                             
-                            send_dtls_response(socket, &mut conn, client_addr, DTLS_HTTP_RESPONSE)?;
-                            return Ok(()); 
+                            if !response_sent {
+                                send_dtls_response(socket, &mut conn, client_addr, payload_size)?;
+                                response_sent = true;
+                            }
                         }
                     }
                     Err(e) => return Err(Box::new(e)),
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if response_sent {
+                    return Ok(());
+                }
                 conn.process_new_packets()?;
             }
             Err(e) => return Err(Box::new(e)),
@@ -351,7 +359,7 @@ fn handle_dtls_connection(
     }
 }
 
-fn run_dtls_server(server_config: ServerConfig, addr: String, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+fn run_dtls_server(server_config: ServerConfig, addr: String, port: u16, payload_size: usize) -> Result<(), Box<dyn std::error::Error>> {
     let socket = UdpSocket::bind(format!("{}:{}", addr, port))?;
     socket.set_read_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
     socket.set_write_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
@@ -365,7 +373,7 @@ fn run_dtls_server(server_config: ServerConfig, addr: String, port: u16) -> Resu
         let acceptor = Acceptor::default();
 
         if let Err(e) =
-            handle_dtls_connection(&socket, acceptor, server_config.clone(), &mut buffer)
+            handle_dtls_connection(&socket, acceptor, server_config.clone(), &mut buffer, payload_size)
         {
             debug!("Error handling DTLS connection: {:?}", e);
             return Err(e);
@@ -427,7 +435,7 @@ fn main() {
             server_config.set_cid(&[cid_val]);
         }
 
-        run_dtls_server(server_config, args.addr, args.port)
+        run_dtls_server(server_config, args.addr, args.port, args.payload_size)
     } else {
         run_tls_server(server_config, args.addr,args.port)
     };

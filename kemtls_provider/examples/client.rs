@@ -57,6 +57,10 @@ struct Args {
     /// Activates PQC provider
     #[arg(short = 'q' ,long, default_value_t = false, action = clap::ArgAction::SetTrue)]
     pqc_provider: bool,
+
+    /// Payload bytes to send after handshake
+    #[arg(short = 'B', long, default_value = "1000")]
+    payload_size: usize,
 }
 
 fn setup_udp_socket(server_addr: &str) -> Result<UdpSocket, std::io::Error> {
@@ -133,9 +137,16 @@ fn perform_dtls_handshake(
 fn send_http_request(
     socket: &UdpSocket,
     conn: &mut ClientConnection,
-    request: &[u8],
+    payload_size: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    conn.writer().write_all(request)?;
+    use std::fs::File;
+    use std::io::Read;
+
+    let mut file = std::fs::File::open("/dev/zero")?;
+    let mut buffer = vec![0u8; payload_size];
+    file.read_exact(&mut buffer)?;
+
+    conn.writer().write_all(&buffer)?;
     send_dtls_datagram(socket, conn)?;
     debug!("HTTP request sent");
     Ok(())
@@ -179,6 +190,7 @@ fn run_dtls_client(
     client_config: ClientConfig,
     server_name: rustls::pki_types::ServerName<'static>,
     server_addr: &str,
+    payload_size: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let socket = setup_udp_socket(server_addr)?;
     let mut conn = ClientConnection::new_dtls(Arc::new(client_config), server_name)?;
@@ -186,13 +198,13 @@ fn run_dtls_client(
     perform_dtls_handshake(&socket, &mut conn)?;
 
     let request = b"Hello from DTLS client!\n";
-    send_http_request(&socket, &mut conn, request)?;
+    send_http_request(&socket, &mut conn, payload_size)?;
 
     println!("Waiting for response...");
     let response = receive_http_response(&socket, &mut conn)?;
 
     println!("Response received:");
-    println!("{}", String::from_utf8_lossy(&response));
+    println!("{:?}", String::from_utf8_lossy(&response));
 
     Ok(())
 }
@@ -307,7 +319,7 @@ fn main() {
             println!("Offering CID: {}", cid_val);
             client_config.set_cid(&[cid_val]);
         }
-        run_dtls_client(client_config, server_name, &server_addr)
+        run_dtls_client(client_config, server_name, &server_addr, args.payload_size)
     } else {
         run_tls_client(client_config, server_name, &server_addr)
     };
