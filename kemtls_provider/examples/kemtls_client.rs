@@ -47,6 +47,10 @@ struct ClientArgs {
     /// Address to connect to
     #[arg(long, default_value = "127.0.0.1")]
     addr: String,
+
+    /// Payload bytes to send after handshake
+    #[arg(short = 'B', long, default_value = "1000")]
+    payload_size: usize,
 }
 
 fn get_kem_algorithm(algorithm: &str) -> Result<oqs::kem::Algorithm, String> {
@@ -90,38 +94,17 @@ fn send_dtls_datagram(
     conn: &mut ClientConnection,
 ) -> Result<(), std::io::Error> {
     while conn.wants_write() {
-        let mut out = Vec::new();
-        conn.write_tls(&mut out)?;
-        if !out.is_empty() {
-            socket.send(&out)?;
-        } else {
-            break;
-        }
+            let mut out_buf = Vec::new();
+            match conn.write_dtls(&mut out_buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    debug!("DTLS datagram len = {} bytes", n);
+                    socket.send(&out_buf)?;
+                }
+                Err(e) => return Err(e),
+            }
     }
     Ok(())
-}
-
-fn receive_dtls_datagram(
-    socket: &UdpSocket,
-    conn: &mut ClientConnection,
-    buffer: &mut [u8],
-) -> Result<(), Box<dyn std::error::Error>> {
-    match socket.recv(buffer){
-        Ok(n) =>{
-            let mut slice = &buffer[..n];
-            while !slice.is_empty() {
-                conn.read_tls(&mut slice)?;
-            }
-            conn.process_new_packets()?;
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock =>{
-            conn.process_new_packets()?;
-        }    
-        Err(e) =>{
-            return Err(Box::new(e))
-        } 
-    }
-    Ok(()) 
 }
 
 fn perform_dtls_handshake(
@@ -154,9 +137,16 @@ fn perform_dtls_handshake(
 fn send_http_request(
     socket: &UdpSocket,
     conn: &mut ClientConnection,
-    request: &[u8],
+    payload_size: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    conn.writer().write_all(request)?;
+    use std::fs::File;
+    use std::io::Read;
+
+    let mut file = File::open("/dev/zero")?;
+    let mut buffer = vec![0u8; payload_size];
+    file.read_exact(&mut buffer)?;
+
+    conn.writer().write_all(&buffer)?;
     send_dtls_datagram(socket, conn)?;
     Ok(())
 }
@@ -164,31 +154,41 @@ fn send_http_request(
 fn receive_http_response(
     socket: &UdpSocket,
     conn: &mut ClientConnection,
+    expected_size: usize,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut in_buf = [0u8; BUFFER_SIZE];
     let mut plaintext = Vec::new();
     
-    loop {
+    while plaintext.len() < expected_size {
         let mut tmp = [0u8; BUFFER_SIZE];
-        {
+        loop {
             let mut reader = conn.reader();
             match reader.read(&mut tmp) {
-                Ok(0) => {}
+                Ok(0) => break, 
                 Ok(n) => {
                     plaintext.extend_from_slice(&tmp[..n]);
-                    if plaintext.len() > 0 && n < BUFFER_SIZE {
-                        break;
-                    }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(e) => return Err(Box::new(e)),
             }
         }
 
-        if plaintext.is_empty() {
-            receive_dtls_datagram(socket, conn, &mut in_buf)?;
-        } else {
+        if plaintext.len() >= expected_size {
             break;
+        }
+
+        match socket.recv(&mut in_buf) {
+            Ok(n) => {
+                let mut slice = &in_buf[..n];
+                while !slice.is_empty() {
+                    conn.read_tls(&mut slice)?;
+                }
+                conn.process_new_packets()?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                conn.process_new_packets()?;
+            }
+            Err(e) => return Err(Box::new(e)),
         }
     }
 
@@ -199,19 +199,19 @@ fn run_dtls_client(
     client_config: ClientConfig,
     server_name: rustls::pki_types::ServerName<'static>,
     server_addr: &str,
+    payload_size: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let socket = setup_udp_socket(server_addr)?;
     let mut conn = ClientConnection::new_dtls(Arc::new(client_config), server_name)?;
 
     perform_dtls_handshake(&socket, &mut conn)?;
 
-    let request = b"Hello from DTLS client\n";
-    send_http_request(&socket, &mut conn, request)?;
+    send_http_request(&socket, &mut conn, payload_size)?;
 
-    let response = receive_http_response(&socket, &mut conn)?;
+    let response = receive_http_response(&socket, &mut conn, payload_size)?;
 
     println!("Response received:");
-    println!("{}", String::from_utf8_lossy(&response));
+    println!("{:?}", String::from_utf8_lossy(&response));
 
     Ok(())
 }
@@ -334,7 +334,7 @@ fn main() {
             println!("Offering CID: {}", cid_val);
             client_config.set_cid(&[cid_val]);
         }
-        run_dtls_client(client_config, server_name, &server_addr)
+        run_dtls_client(client_config, server_name, &server_addr, args.payload_size)
     } else {
         run_tls_client(client_config, server_name, &server_addr)
     };
