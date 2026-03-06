@@ -8,68 +8,197 @@ use std::io::{Read, Write};
 use std::net::UdpSocket;
 use std::sync::Arc;
 use rustls::ServerConnection;
-use std::net::TcpStream;
-use std::net::TcpListener;
-use std::net::SocketAddr;
-use std::time::Duration;
+use std::net::{TcpListener, TcpStream, SocketAddr};
+use std::time::{Duration, Instant};
+use std::collections::HashMap;
 use clap::Parser;
 
 const BUFFER_SIZE: usize = 4096;
-const TIMEOUT_SECS: u64 = 1;
-const HTTP_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\n\
-                                Connection: closed\r\n\
-                                Content-Type: text/html\r\n\
-                                \r\n\
-                                <h1>Hello Authenticated World!</h1>\r\n";
-const DTLS_HTTP_RESPONSE: &[u8] =
-    b"Hello World, I'm using DTLS 1.3!";
+const TIMEOUT_SECS: u64 = 30; 
+const HTTP_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nConnection: closed\r\nContent-Type: text/html\r\n\r\n<h1>Hello KEMTLS World!</h1>\r\n";
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Server with TLS 1.3 and DTLS 1.3 support", long_about = None)]
 struct Args {
-    /// KX group to use (e.g. MLKEM768, BikeL3, Hqc192, NtruPrimeSntrup761)
     #[arg(long)]
     group: Option<String>,
-
-    /// Optional CID value to offer in DTLS (0-255)
     #[arg(long)]
     cid: Option<u8>,
-
-    /// Maximum fragment length for DTLS
     #[arg(short = 'L', default_value_t = 1400)]
     max_fragment_length: usize,
-
-    /// Disables client authentication
     #[arg(short = 'd', default_value_t = true, action = clap::ArgAction::SetFalse)]
     client_auth: bool,
-
-    /// Certificate File
     #[arg(short = 'c', default_value = "../test-ca/rsa-2048/end.fullchain")]
     cert_file: String,
-
-    /// Key file
     #[arg(short = 'k', default_value = "../test-ca/rsa-2048/end.key")]
     pk_file: String,
-
-    /// Certificate Authority file
     #[arg(short = 'A', default_value = "../test-ca/rsa-2048/ca.cert")]
     ca_file: String,
-
-    /// Port to listen on 
     #[arg(short, long, default_value_t = 8443)]
     port: u16,
-
-    /// Address to bind to
     #[arg(long, default_value = "127.0.0.1")]
     addr: String,
-
-    /// Activates PQC provider
     #[arg(short = 'q' ,long, default_value_t = false, action = clap::ArgAction::SetTrue)]
     pqc_provider: bool,
-
-    /// Payload bytes to send after handshake
-    #[arg(short = 'B', long, default_value = "1000")]
+    #[arg(short = 'B', long, default_value_t = 1000)]
     payload_size: usize,
+}
+
+enum ClientState {
+    Handshaking {
+        acceptor: Acceptor,
+        last_seen: Instant,
+    },
+    Connected {
+        conn: ServerConnection,
+        response_sent: bool,
+        last_seen: Instant,
+    },
+}
+
+impl ClientState {
+    fn handle_datagram(
+        &mut self,
+        packet: &[u8],
+        socket: &UdpSocket,
+        addr: SocketAddr,
+        server_config: ServerConfig,
+        payload_size: usize,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        match self {
+            ClientState::Handshaking { acceptor, last_seen } => {
+                *last_seen = Instant::now();
+                let mut slice = packet;
+                acceptor.read_tls(&mut slice)?;
+
+                match acceptor.accept() {
+                    Ok(Some(accepted)) => {
+                        let mut conn = match accepted.into_connection(server_config.into()) {
+                            Ok(conn) => conn,
+                            Err((err, mut alert)) => {
+                                debug!("Error creating connection: {:?}", err);
+                                let mut out = Vec::new();
+                                if let Err(write_err) = alert.write(&mut out) {
+                                    debug!("Error writing alert: {:?}", write_err);
+                                } else {
+                                    let _ = socket.send_to(&out, addr);
+                                }
+                                return Err(format!("Connection error: {:?}", err).into());
+                            }
+                        };
+                        println!("Handshake exitoso con {}", addr);
+                        
+                        Self::flush_output(&mut conn, socket, addr)?;
+
+                        *self = ClientState::Connected {
+                            conn,
+                            response_sent: false,
+                            last_seen: Instant::now(),
+                        };
+                    }
+                    Ok(None) => {}
+                    Err((err, mut alert)) => {
+                        let mut out = Vec::new();
+                        alert.write(&mut out).ok();
+                        let _ = socket.send_to(&out, addr);
+                        return Err(Box::new(err));
+                    }
+                }
+            }
+            ClientState::Connected { conn, response_sent, last_seen } => {
+                *last_seen = Instant::now();
+                let mut slice = packet;
+                conn.read_tls(&mut slice)?;
+                let io_state = conn.process_new_packets()?;
+
+                if io_state.plaintext_bytes_to_read() > 0 {
+                    let mut reader = conn.reader();
+                    let mut buf = vec![0u8; io_state.plaintext_bytes_to_read()];
+                    reader.read_exact(&mut buf).ok();
+
+                    if !*response_sent {
+                        send_zero_payload(conn, payload_size)?;
+                        *response_sent = true;
+                    }
+                }
+
+                Self::flush_output(conn, socket, addr)?;
+
+                if *response_sent && !conn.wants_write() {
+                    return Ok(true); 
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn flush_output(conn: &mut ServerConnection, socket: &UdpSocket, addr: SocketAddr) -> Result<(), std::io::Error> {
+        while conn.wants_write() {
+            let mut out_buf = Vec::new();
+            if conn.write_dtls(&mut out_buf)? > 0 {
+                socket.send_to(&out_buf, addr)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn send_zero_payload(conn: &mut ServerConnection, size: usize) -> Result<(), std::io::Error> {
+    let mut buffer = vec![0u8; size];
+    if let Ok(mut file) = std::fs::File::open("/dev/zero") {
+        file.read_exact(&mut buffer).ok();
+    }
+    conn.writer().write_all(&buffer)?;
+    Ok(())
+}
+
+fn run_dtls_server(server_config: ServerConfig, addr: String, port: u16, payload_size: usize) -> Result<(), Box<dyn std::error::Error>> {
+    let socket = UdpSocket::bind(format!("{}:{}", addr, port))?;
+    socket.set_nonblocking(true)?;
+    println!("DTLS Multi-Client Server listening on {}:{} (Single-Threaded)", addr, port);
+
+    let mut clients: HashMap<SocketAddr, ClientState> = HashMap::new();
+    let mut buffer = [0u8; BUFFER_SIZE];
+
+    loop {
+        loop {
+            match socket.recv_from(&mut buffer) {
+                Ok((len, addr)) => {
+                    let packet = &buffer[..len];
+                    let state = clients.entry(addr).or_insert_with(|| {
+                        println!("Nuevo cliente: {}", addr);
+                        ClientState::Handshaking {
+                            acceptor: Acceptor::default(),
+                            last_seen: Instant::now(),
+                        }
+                    });
+
+                    if let Ok(finished) = state.handle_datagram(packet, &socket, addr, server_config.clone(), payload_size) {
+                        if finished { clients.remove(&addr); }
+                    } else {
+                        clients.remove(&addr);
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(Box::new(e)),
+            }
+        }
+
+        let now = Instant::now();
+        clients.retain(|addr, state| {
+            match state {
+                ClientState::Connected { conn, last_seen, .. } => {
+                    conn.process_new_packets().ok();
+                    let _ = ClientState::flush_output(conn, &socket, *addr);
+                    now.duration_since(*last_seen) < Duration::from_secs(TIMEOUT_SECS)
+                }
+                ClientState::Handshaking { last_seen, .. } => {
+                    now.duration_since(*last_seen) < Duration::from_secs(TIMEOUT_SECS)
+                }
+            }
+        });
+
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn handle_tls_client(
@@ -142,209 +271,6 @@ fn run_tls_server(server_config: ServerConfig, addr: String, port: u16) -> Resul
     Ok(())
 }
 
-fn send_dtls_response(
-    socket: &UdpSocket,
-    conn: &mut ServerConnection,
-    client_addr: SocketAddr,
-    payload_size: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use std::fs::File;
-    use std::io::Read;
-
-    let mut file = File::open("/dev/zero")?;
-    let mut buffer = vec![0u8; payload_size];
-    file.read_exact(&mut buffer)?;
-
-    conn.writer().write_all(&buffer)?;
-
-    while conn.wants_write() {
-        let mut out_buf = Vec::new();
-        match conn.write_dtls(&mut out_buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                debug!("DTLS datagram len = {} bytes", n);
-                socket.send_to(&out_buf, client_addr)?;
-            }
-            Err(e) => return Err(Box::new(e)),
-        }
-    }
-
-    //socket.send_to(&out_buf, client_addr)?;
-    debug!("Response sent to client {}", client_addr);
-
-    Ok(())
-}
-
-fn handle_dtls_connection(
-    socket: &UdpSocket,
-    mut acceptor: Acceptor,
-    server_config: ServerConfig,
-    buffer: &mut [u8],
-    payload_size: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let (accepted, client_addr) = loop {
-        let (len, client_addr) = match socket.recv_from(buffer) {
-            Ok(v) => v,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                return Ok(());
-            }
-            Err(e) => return Err(Box::new(e))
-        }; 
-
-        let mut slice = &buffer[..len];
-        while !slice.is_empty() {
-            acceptor.read_tls(&mut slice)?;
-        }
-
-        match acceptor.accept() {
-            Ok(Some(accepted)) => break (accepted, client_addr),
-            Ok(None) => continue,
-            Err((err, mut alert)) => {
-                debug!("Error in handshake: {:?}", err);
-                let mut out = Vec::new();
-                if let Err(write_err) = alert.write(&mut out) {
-                    debug!("Error writing alert: {:?}", write_err);
-                } else {
-                    let _ = socket.send_to(&out, client_addr);
-                }
-                return Err(format!("Handshake error: {:?}", err).into());
-            }
-        }
-    };
-
-    let mut conn = match accepted.into_connection(server_config.into()) {
-        Ok(conn) => conn,
-        Err((err, mut alert)) => {
-            debug!("Error creating connection: {:?}", err);
-            let mut out = Vec::new();
-            if let Err(write_err) = alert.write(&mut out) {
-                debug!("Error writing alert: {:?}", write_err);
-            } else {
-                let _ = socket.send_to(&out, client_addr);
-            }
-            return Err(format!("Connection error: {:?}", err).into());
-        }
-    };
-
-    while conn.is_handshaking() {
-        while conn.wants_write() {
-            let mut out_buf = Vec::new();
-
-            match conn.write_dtls(&mut out_buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    debug!("DTLS datagram len = {} bytes", n);
-                    socket.send_to(&out_buf, client_addr)?;
-                }
-                Err(e) => return Err(Box::new(e)),
-            }
-        }
-
-        match socket.recv_from(buffer){
-            Ok((len, addr)) =>{
-                if addr != client_addr {
-                    debug!("Addres missmatch");
-                    continue;
-                } 
-                let mut slice = &buffer[..len];
-                while !slice.is_empty() {
-                    conn.read_tls(&mut slice)?;
-                }
-                conn.process_new_packets()?;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock =>{
-                conn.process_new_packets()?;
-            }    
-            Err(e) =>{
-                return Err(Box::new(e))
-            } 
-        } 
-    }
-
-    debug!("Handshake completed!");
-
-    let mut response_sent = false;
-    loop {
-        while conn.wants_write() {
-            let mut out_buf = Vec::new();
-
-            match conn.write_dtls(&mut out_buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    debug!("DTLS datagram len = {} bytes", n);
-                    socket.send_to(&out_buf, client_addr)?;
-                }
-                Err(e) => return Err(Box::new(e)),
-            }
-        }
-
-        match socket.recv_from(buffer) {
-            Ok((len, addr)) => {
-                if addr != client_addr { continue; }
-
-                let mut slice = &buffer[..len];
-                let mut read_err = None;
-                while !slice.is_empty() {
-                    if let Err(e) = conn.read_tls(&mut slice) {
-                        read_err = Some(e);
-                        break;
-                    }
-                }
-                
-                if let Some(e) = read_err {
-                    debug!("Error de lectura TLS: {:?}", e);
-                    continue;
-                }
-                
-                match conn.process_new_packets() {
-                    Ok(io_state) => {
-                        if io_state.plaintext_bytes_to_read() > 0 {
-                            let mut reader = conn.reader();
-                            let mut msg = vec![0u8; io_state.plaintext_bytes_to_read()];
-                            reader.read_exact(&mut msg)?;
-                            println!("Client says: {:?}", String::from_utf8_lossy(&msg));
-                            
-                            if !response_sent {
-                                send_dtls_response(socket, &mut conn, client_addr, payload_size)?;
-                                response_sent = true;
-                            } 
-                        }
-                    }
-                    Err(e) => return Err(Box::new(e)),
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if response_sent {
-                    return Ok(());
-                }
-                conn.process_new_packets()?;
-            }
-            Err(e) => return Err(Box::new(e)),
-        }
-    }
-}
-
-fn run_dtls_server(server_config: ServerConfig, addr: String, port: u16, payload_size: usize) -> Result<(), Box<dyn std::error::Error>> {
-    let socket = UdpSocket::bind(format!("{}:{}", addr, port))?;
-    socket.set_read_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
-    socket.set_write_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
-
-    socket.set_nonblocking(false)?;
-    println!("DTLS server listening on {}:{}", addr, port);
-
-    let mut buffer = [0u8; BUFFER_SIZE];
-
-    loop {
-        let acceptor = Acceptor::default();
-
-        if let Err(e) =
-            handle_dtls_connection(&socket, acceptor, server_config.clone(), &mut buffer, payload_size)
-        {
-            debug!("Error handling DTLS connection: {:?}", e);
-            return Err(e);
-        }
-    }
-}
 fn main() {
     env_logger::init();
 
