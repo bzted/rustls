@@ -17,10 +17,9 @@ dtls13 = ["rustls/dtls13"]
 name = "kem_c"
 path = "examples/kemtls_client.rs"
 
-
 [[example]]
 name = "kem_s"
-path = "examples/kemtls_server.rs"
+path = "examples/kemdtls_server.rs"
 
 [[example]]
 name = "client"
