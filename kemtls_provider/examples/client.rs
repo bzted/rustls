@@ -308,8 +308,8 @@ fn main() {
     // Disable session resumption for testing purposes
     client_config.resumption = rustls::client::Resumption::disabled();
     
+    let server_name: rustls::pki_types::ServerName<'static> = args.addr.clone().try_into().unwrap();
     let server_addr = format!("{}:{}", args.addr, args.port);
-    let server_name = "testserver.com".try_into().unwrap();
 
     let result = if use_dtls {
         println!("Max fragment size set to: {}", args.max_fragment_length);

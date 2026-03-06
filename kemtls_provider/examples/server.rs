@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use clap::Parser;
 
 const BUFFER_SIZE: usize = 4096;
-const TIMEOUT_SECS: u64 = 30; 
+const TIMEOUT_SECS: u64 = 10; 
 const HTTP_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nConnection: closed\r\nContent-Type: text/html\r\n\r\n<h1>Hello KEMTLS World!</h1>\r\n";
 
 #[derive(Parser, Debug)]
@@ -154,35 +154,31 @@ fn send_zero_payload(conn: &mut ServerConnection, size: usize) -> Result<(), std
 fn run_dtls_server(server_config: ServerConfig, addr: String, port: u16, payload_size: usize) -> Result<(), Box<dyn std::error::Error>> {
     let socket = UdpSocket::bind(format!("{}:{}", addr, port))?;
     socket.set_nonblocking(true)?;
-    println!("DTLS Multi-Client Server listening on {}:{} (Single-Threaded)", addr, port);
+    println!("DTLS Multi-Client Server listening on {}:{}", addr, port);
 
     let mut clients: HashMap<SocketAddr, ClientState> = HashMap::new();
     let mut buffer = [0u8; BUFFER_SIZE];
 
     loop {
-        loop {
-            match socket.recv_from(&mut buffer) {
-                Ok((len, addr)) => {
-                    let packet = &buffer[..len];
-                    let state = clients.entry(addr).or_insert_with(|| {
-                        println!("Nuevo cliente: {}", addr);
-                        ClientState::Handshaking {
-                            acceptor: Acceptor::default(),
-                            last_seen: Instant::now(),
-                        }
-                    });
-
-                    if let Ok(finished) = state.handle_datagram(packet, &socket, addr, server_config.clone(), payload_size) {
-                        if finished { clients.remove(&addr); }
-                    } else {
-                        clients.remove(&addr);
-                    }
+        // Recibir todos los paquetes pendientes en el buffer del sistema
+        while let Ok((len, addr)) = socket.recv_from(&mut buffer) {
+            let packet = &buffer[..len];
+            let state = clients.entry(addr).or_insert_with(|| {
+                println!("Nuevo cliente: {}", addr);
+                ClientState::Handshaking {
+                    acceptor: Acceptor::default(),
+                    last_seen: Instant::now(),
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(e) => return Err(Box::new(e)),
+            });
+
+            // handle_datagram ya no devuelve un flag de finalización
+            if let Err(e) = state.handle_datagram(packet, &socket, addr, server_config.clone(), payload_size) {
+                debug!("Error en sesión {}: {:?}", addr, e);
+                clients.remove(&addr);
             }
         }
 
+        // Tick de mantenimiento
         let now = Instant::now();
         clients.retain(|addr, state| {
             match state {
@@ -280,7 +276,7 @@ fn main() {
     }
 
     println!("Starting traditional server...");
-    let mut args = Args::parse();
+    let args = Args::parse();
 
     let mut root_store = RootCertStore::empty();
     root_store.add_parsable_certificates(
