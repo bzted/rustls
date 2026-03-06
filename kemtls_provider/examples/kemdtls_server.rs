@@ -227,7 +227,6 @@ impl ClientState {
                                 return Err(format!("Connection error: {:?}", err).into());
                             }
                         };
-                        println!("Handshake completado para {}", addr);
                         
                         Self::write_pending(&mut conn, socket, addr)?;
 
@@ -346,7 +345,7 @@ fn run_dtls_server(
                             ClientState::Handshaking { last_seen, .. } => last_seen,
                             ClientState::Connected { last_seen, .. } => last_seen,
                         };
-                        if now.duration_since(*last) > Duration::from_secs(30) {
+                        if now.duration_since(*last) > Duration::from_secs(10) {
                             println!("Sesión expirada: {}", addr);
                             false
                         } else {
