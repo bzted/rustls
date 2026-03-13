@@ -1,15 +1,16 @@
-pub use kem_key::MlKemKey;
+pub use kem_key::{PureKemKey, HybridKemKey};
 use rustls::crypto::aws_lc_rs;
 
 mod algorithms;
 mod kem_key;
 mod key_exchange;
+pub mod hybrid;
 pub mod psk_key;
 pub mod resolver;
 pub mod sign;
 pub mod verify;
 pub use algorithms::{
-    get_kx_group_by_name, BikeL1, BikeL3, BikeL5, Hqc128, Hqc192, Hqc256, NtruPrimeStrup761,
+    get_kx_group_by_name, BikeL1, BikeL3, BikeL5, Hqc128, Hqc192, Hqc256, NtruPrimeSntrup761,
     KX_GROUPS, MLKEM1024, MLKEM512, MLKEM768,
 };
 pub use key_exchange::KeyExchange;
