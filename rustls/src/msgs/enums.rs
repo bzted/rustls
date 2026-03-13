@@ -237,7 +237,18 @@ enum_builder! {
         Hqc128 => 0x0206,   // Test value, IANA TBD
         Hqc192 => 0x0207,   // Test value, IANA TBD
         Hqc256 => 0x0208,   // Test value, IANA TBD
-        NtruPrimeStrup761 => 0x0209,    // Test value, IANA TBD
+        NtruPrimeSntrup761 => 0x0209,    // Test value, IANA TBD
+        X25519BikeL1 => 0x0210,   // Test value, IANA TBD
+        X25519BikeL3 => 0x0211,   // Test value, IANA TBD
+        X25519BikeL5 => 0x0212,   // Test value, IANA TBD
+        X25519Hqc128 => 0x0213,   // Test value, IANA TBD
+        X25519Hqc192 => 0x0214,   // Test value, IANA TBD
+        X25519Hqc256 => 0x0215,   // Test value, IANA TBD
+        X25519NtruPrimeSntrup761 => 0x0216,    // Test value, IANA TBD
+        X25519MLKEM512 => 0x0217,   // Test value, IANA TBD
+        X25519MLKEM1024 => 0x0218,   // Test value, IANA TBD
+        secp384r1MLKEM1024 => 0x11ed,
+        curveSM2MLKEM768 => 0x11ee,  
     }
 }
 

@@ -1,7 +1,7 @@
 use kemtls_provider::resolver::{KeyPair, ServerCertResolver};
 use kemtls_provider::sign::DummySigningKey;
 use kemtls_provider::verify::ServerVerifier;
-use kemtls_provider::{get_kx_group_by_name, provider, MlKemKey};
+use kemtls_provider::{get_kx_group_by_name, provider, PureKemKey};
 use log::debug;
 use oqs::kem::Kem;
 use rustls::crypto::CryptoProvider;
@@ -96,15 +96,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let signing_key = Arc::new(DummySigningKey);
 
-    let kem_key = Arc::new(MlKemKey::new(kemalg, secret_key.as_ref().to_vec()));
+    let kem_key = Arc::new(PureKemKey::new(kemalg, secret_key.as_ref().to_vec()));
     // Create our key pair structure
-    let key_pair = KeyPair::new(public_key, signing_key, Some(kem_key));
+    let key_pair = KeyPair::new(public_key, None, signing_key, Some(kem_key));
 
     // Create our custom resolver
     let resolver = Arc::new(ServerCertResolver::new(key_pair));
 
     // Create our custom verifier
-    let client_verifier = Arc::new(ServerVerifier::new(kemalg));
+    let client_verifier = Arc::new(ServerVerifier::new(kemalg, None, None));
 
     // Set up TLS server with AuthKEM provider
     let mut crypto_provider = provider();

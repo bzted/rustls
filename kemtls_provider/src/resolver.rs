@@ -19,20 +19,21 @@ impl ServerCertResolver {
 }
 
 impl ResolvesServerCert for ServerCertResolver {
-    fn resolve(&self, client_hello: ClientHello) -> Option<Arc<CertifiedKey>> {
+    fn resolve(&self, _client_hello: ClientHello) -> Option<Arc<CertifiedKey>> {
         debug!("ServerCertResolver::resolve called");
         debug!(
-            "Key size: {} bytes",
-            self.key_pair.public_key.as_ref().len()
+            "PQ key size: {} bytes, X25519 key size: {} bytes",
+            self.key_pair.pq_public_key.as_ref().len(),
+            self.key_pair.x25519_public_key.as_ref().map_or(0, |k| k.len()),
         );
 
-        let raw_key = self
-            .key_pair
-            .public_key
-            .as_ref()
-            .to_vec();
+        let mut cert_bytes = self.key_pair.pq_public_key.as_ref().to_vec();
 
-        let cert = CertificateDer::from(raw_key.clone());
+        if let Some(x25519_key) = &self.key_pair.x25519_public_key {
+            cert_bytes.extend_from_slice(x25519_key);
+        }
+
+        let cert = CertificateDer::from(cert_bytes);
 
         let certified_key = CertifiedKey {
             cert: vec![cert],
@@ -63,22 +64,23 @@ impl ClientCertResolver {
 impl ResolvesClientCert for ClientCertResolver {
     fn resolve(
         &self,
-        root_hint_subjects: &[&[u8]],
-        sigschemes: &[SignatureScheme],
+        _root_hint_subjects: &[&[u8]],
+        _sigschemes: &[SignatureScheme],
     ) -> Option<Arc<CertifiedKey>> {
         debug!("ClientCertResolver::resolve called");
         debug!(
-            "Key size: {} bytes",
-            self.key_pair.public_key.as_ref().len()
+            "PQ key size: {} bytes, X25519 key size: {} bytes",
+            self.key_pair.pq_public_key.as_ref().len(),
+            self.key_pair.x25519_public_key.as_ref().map_or(0, |k| k.len()),
         );
 
-        let raw_key = self
-            .key_pair
-            .public_key
-            .as_ref()
-            .to_vec();
+        let mut cert_bytes = self.key_pair.pq_public_key.as_ref().to_vec();
 
-        let cert = CertificateDer::from(raw_key.clone());
+        if let Some(x25519_key) = &self.key_pair.x25519_public_key {
+            cert_bytes.extend_from_slice(x25519_key);
+        }
+
+        let cert = CertificateDer::from(cert_bytes);
 
         let certified_key = CertifiedKey {
             cert: vec![cert],
@@ -97,21 +99,24 @@ impl ResolvesClientCert for ClientCertResolver {
 
 #[derive(Debug)]
 pub struct KeyPair {
-    public_key: oqs::kem::PublicKey,
+    pq_public_key: oqs::kem::PublicKey,
+    x25519_public_key: Option<[u8; 32]>,
     private_key: Arc<dyn rustls::sign::SigningKey>,
     kem_key: Option<Arc<dyn rustls::sign::KemKey>>,
 }
 
 impl KeyPair {
     pub fn new(
-        public_key: oqs::kem::PublicKey,
-        signing_key: Arc<dyn rustls::sign::SigningKey>,
+        pq_public_key: oqs::kem::PublicKey,
+        x25519_public_key: Option<[u8; 32]>,
+        private_key: Arc<dyn rustls::sign::SigningKey>,
         kem_key: Option<Arc<dyn rustls::sign::KemKey>>,
     ) -> Self {
         Self {
-            public_key,
-            private_key: signing_key,
-            kem_key,
+            pq_public_key,
+            x25519_public_key,
+            private_key,
+            kem_key
         }
     }
 }

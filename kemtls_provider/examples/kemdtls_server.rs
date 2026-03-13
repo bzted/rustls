@@ -1,18 +1,21 @@
 use kemtls_provider::resolver::{KeyPair, ServerCertResolver};
 use kemtls_provider::sign::DummySigningKey;
 use kemtls_provider::verify::ServerVerifier;
-use kemtls_provider::{get_kx_group_by_name, provider, MlKemKey};
+use kemtls_provider::{PureKemKey, get_kx_group_by_name, provider, HybridKemKey};
 use log::debug;
 use oqs::kem::Kem;
 use rustls::crypto::CryptoProvider;
 use rustls::server::Acceptor;
-use rustls::{ServerConfig, ServerConnection};
+use rustls::{Error, ServerConfig, ServerConnection};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use clap::Parser;
 use std::collections::HashMap;
+use rustls::sign::KemKey;
+use openssl::pkey::{Id, PKey};
+use std::fs;
 
 const BUFFER_SIZE: usize = 4096;
 const TIMEOUT_SECS: u64 = 1;
@@ -52,6 +55,13 @@ struct ServerArgs {
     /// Payload bytes to send after handshake
     #[arg(short = 'B', long, default_value = "1000")]
     payload_size: usize,
+
+    /// Enables hybrid KEMs
+    #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
+    hybrid: bool,
+
+    #[arg(short = 'k', long)]
+    x25519_key: Option<String>,
 }
 
 fn get_kem_algorithm(algorithm: &str) -> Result<oqs::kem::Algorithm, String> {
@@ -83,16 +93,33 @@ fn create_server_config(
     kemalg: oqs::kem::Algorithm,
     crypto_provider: CryptoProvider,
     client_auth: bool,
+    hybrid: bool,
+    x25519_key_path: Option<String>,
 ) -> Result<ServerConfig, Box<dyn std::error::Error>> {
     let kem = Kem::new(kemalg)?;
     let (public_key, secret_key) = kem.keypair()?;
 
     let signing_key = Arc::new(DummySigningKey);
-    let kem_key = Arc::new(MlKemKey::new(kemalg, secret_key.as_ref().to_vec()));
-    let key_pair = KeyPair::new(public_key, signing_key, Some(kem_key));
+    
+    let (kem_key, x25519_sk, x25519_pk) = match hybrid {
+        true => {
+            let path = x25519_key_path.ok_or("Invalid x25519 key path")?;
+            let (x25519_sk, x25519_pk) = load_x25519_keypair_from_pem(&path)?;
+
+            let kem_key: Arc<dyn KemKey> = Arc::new(HybridKemKey::new(kemalg,secret_key.as_ref().to_vec(), x25519_sk));
+            (kem_key, Some(x25519_sk), Some(x25519_pk))
+        },
+        false => {
+            let kem_key: Arc<dyn KemKey> = Arc::new(PureKemKey::new(kemalg, secret_key.as_ref().to_vec()));
+            (kem_key, None, None)
+        }
+    };
+
+    // Create our key pair structure
+    let key_pair = KeyPair::new(public_key, x25519_pk, signing_key, Some(kem_key));
 
     let resolver = Arc::new(ServerCertResolver::new(key_pair));
-    let client_verifier = Arc::new(ServerVerifier::new(kemalg));
+    let client_verifier = Arc::new(ServerVerifier::new(kemalg, x25519_sk, x25519_pk));
 
     let mut server_config = match client_auth {
         true => ServerConfig::builder_with_provider(crypto_provider.into())
@@ -110,6 +137,38 @@ fn create_server_config(
 
     println!("Server config created successfully");
     Ok(server_config)
+}
+
+fn load_x25519_keypair_from_pem(path: &str) -> Result<([u8; 32], [u8; 32]), Error> {
+    let pem = fs::read(path)
+        .map_err(|e| Error::General(format!("failed to read x25519 key file: {e}")))?;
+
+    let pkey = PKey::private_key_from_pem(&pem)
+        .map_err(|e| Error::General(format!("failed to parse x25519 private key PEM: {e}")))?;
+
+    if pkey.id() != Id::X25519 {
+        return Err(Error::General("provided key is not X25519".into()));
+    }
+
+    let raw_sk = pkey
+        .raw_private_key()
+        .map_err(|e| Error::General(format!("failed to extract raw x25519 private key: {e}")))?;
+
+    let raw_pk = pkey
+        .raw_public_key()
+        .map_err(|e| Error::General(format!("failed to extract raw x25519 public key: {e}")))?;
+
+    let sk: [u8; 32] = raw_sk
+        .as_slice()
+        .try_into()
+        .map_err(|_| Error::General("invalid raw x25519 private key length".into()))?;
+
+    let pk: [u8; 32] = raw_pk
+        .as_slice()
+        .try_into()
+        .map_err(|_| Error::General("invalid raw x25519 public key length".into()))?;
+
+    Ok((sk, pk))
 }
 
 // TLS Helper Functions
@@ -249,7 +308,16 @@ impl ClientState {
             ClientState::Connected { conn, response_sent, last_seen } => {
                 *last_seen = Instant::now();
                 let mut slice = packet;
-                conn.read_tls(&mut slice)?;
+                if let Err(e) = conn.read_tls(&mut slice) {
+                    let _ = Self::write_pending(conn, socket, addr);
+                    return Err(Box::new(e));
+                }
+                if let Err(e) = conn.process_new_packets() {
+                    eprintln!("Error fatal procesando paquetes: {:?}", e);
+                    let _ = Self::write_pending(conn, socket, addr);
+                    return Err(Box::new(e));
+                }
+
                 let io_state = conn.process_new_packets()?;
 
                 if io_state.plaintext_bytes_to_read() > 0 {
@@ -271,6 +339,30 @@ impl ClientState {
             }
         }
         Ok(false)
+    }
+
+    fn handle_timeout(
+        &mut self,
+        socket: &UdpSocket,
+        addr: SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match self {
+            ClientState::Connected { conn, .. } => {
+                if let Err(e) = conn.process_new_packets() {
+                    let mut alert_buf = Vec::new();
+                    if let Ok(len) = conn.write_dtls(&mut alert_buf) {
+                        if len > 0 {
+                            let _ = socket.send_to(&alert_buf, addr);
+                        }
+                    }
+                    return Err(Box::new(e));
+                }
+                Self::write_pending(conn, socket, addr)?;
+            }
+            ClientState::Handshaking { .. } => {
+            }
+        }
+        Ok(())
     }
 
     fn write_pending(conn: &mut ServerConnection, socket: &UdpSocket, addr: SocketAddr) -> Result<(), std::io::Error> {
@@ -347,10 +439,13 @@ fn run_dtls_server(
                         };
                         if now.duration_since(*last) > Duration::from_secs(10) {
                             println!("Sesión expirada: {}", addr);
-                            false
-                        } else {
-                            true
+                            return false;
+                        }  
+                        if let Err(err) = state.handle_timeout(&socket, *addr) {
+                            eprintln!("Error en retransmisión para {}: {:?}", addr, err);
+                            return false;
                         }
+                        true
                     });
                     std::thread::sleep(Duration::from_millis(1));
                 }
@@ -397,7 +492,7 @@ fn main() {
         println!("  KX group: {:?}", kx.name());
     }
 
-    let mut server_config = match create_server_config(kemalg, crypto_provider, args.client_auth) {
+    let mut server_config = match create_server_config(kemalg, crypto_provider, args.client_auth, args.hybrid, args.x25519_key) {
         Ok(config) => config,
         Err(e) => {
             debug!("Failed to create server config: {:?}", e);

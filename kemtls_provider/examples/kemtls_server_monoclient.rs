@@ -1,7 +1,7 @@
 use kemtls_provider::resolver::{KeyPair, ServerCertResolver};
 use kemtls_provider::sign::DummySigningKey;
 use kemtls_provider::verify::ServerVerifier;
-use kemtls_provider::{get_kx_group_by_name, provider, MlKemKey};
+use kemtls_provider::{get_kx_group_by_name, provider, PureKemKey};
 use log::debug;
 use oqs::kem::Kem;
 use rustls::crypto::CryptoProvider;
@@ -16,7 +16,6 @@ use clap::Parser;
 const BUFFER_SIZE: usize = 4096;
 const TIMEOUT_SECS: u64 = 1;
 const HTTP_RESPONSE: &[u8] = b"Hello from TLS Server!";
-const DTLS_HTTP_RESPONSE: &[u8] = b"Hello from DTLS Server!";
 
 #[derive(Parser, Debug)]
 #[command(about = "KEMTLS Server with TLS 1.3 and DTLS 1.3 support")]
@@ -88,11 +87,11 @@ fn create_server_config(
     let (public_key, secret_key) = kem.keypair()?;
 
     let signing_key = Arc::new(DummySigningKey);
-    let kem_key = Arc::new(MlKemKey::new(kemalg, secret_key.as_ref().to_vec()));
-    let key_pair = KeyPair::new(public_key, signing_key, Some(kem_key));
+    let kem_key = Arc::new(PureKemKey::new(kemalg, secret_key.as_ref().to_vec()));
+    let key_pair = KeyPair::new(public_key, None, signing_key, Some(kem_key));
 
     let resolver = Arc::new(ServerCertResolver::new(key_pair));
-    let client_verifier = Arc::new(ServerVerifier::new(kemalg));
+    let client_verifier = Arc::new(ServerVerifier::new(kemalg, None, None));
 
     let mut server_config = match client_auth {
         true => ServerConfig::builder_with_provider(crypto_provider.into())

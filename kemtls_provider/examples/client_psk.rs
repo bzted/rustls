@@ -2,7 +2,7 @@ use kemtls_provider::psk_key::PskKey;
 use kemtls_provider::resolver::{ClientCertResolver, KeyPair};
 use kemtls_provider::sign::DummySigningKey;
 use kemtls_provider::verify::ClientVerifier;
-use kemtls_provider::{get_kx_group_by_name, provider, MlKemKey};
+use kemtls_provider::{get_kx_group_by_name, provider, PureKemKey};
 use log::debug;
 use oqs::kem::Kem;
 use rustls::crypto::CryptoProvider;
@@ -98,7 +98,7 @@ fn main() {
         }
     };
 
-    let server_verifier = Arc::new(ClientVerifier::new(kemalg));
+    let server_verifier = Arc::new(ClientVerifier::new(kemalg, None, None));
 
     let kem = Kem::new(kemalg).expect("Failed to create kem instance");
 
@@ -108,10 +108,10 @@ fn main() {
 
     let signing_key = Arc::new(DummySigningKey);
 
-    let kem_key = Arc::new(MlKemKey::new(kemalg, secret_key.as_ref().to_vec()));
+    let kem_key = Arc::new(PureKemKey::new(kemalg, secret_key.as_ref().to_vec()));
 
     // Create our key pair structure
-    let key_pair = KeyPair::new(public_key, signing_key, Some(kem_key));
+    let key_pair = KeyPair::new(public_key, None, signing_key, Some(kem_key));
 
     // Create our custom resolver
     let resolver = Arc::new(ClientCertResolver::new(key_pair));

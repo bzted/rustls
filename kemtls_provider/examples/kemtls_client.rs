@@ -8,11 +8,15 @@ use clap::Parser;
 use kemtls_provider::resolver::{ClientCertResolver, KeyPair};
 use kemtls_provider::sign::DummySigningKey;
 use kemtls_provider::verify::ClientVerifier;
-use kemtls_provider::{get_kx_group_by_name, provider, MlKemKey};
+use kemtls_provider::{HybridKemKey, PureKemKey, get_kx_group_by_name, provider};
 use log::debug;
 use oqs::kem::Kem;
 use rustls::crypto::CryptoProvider;
+use rustls::sign::KemKey;
 use rustls::{ClientConfig, ClientConnection};
+use rustls::Error;
+use openssl::pkey::{Id, PKey};
+use std::fs;
 
 const BUFFER_SIZE: usize = 4096;
 const TIMEOUT_SECS: u64 = 1;
@@ -51,6 +55,13 @@ struct ClientArgs {
     /// Payload bytes to send after handshake
     #[arg(short = 'B', long, default_value = "1000")]
     payload_size: usize,
+
+    /// Enables hybrid KEMs
+    #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
+    hybrid: bool,
+
+    #[arg(short = 'k', long, default_value = None)]
+    x25519_key: Option<String>,
 }
 
 fn get_kem_algorithm(algorithm: &str) -> Result<oqs::kem::Algorithm, String> {
@@ -76,6 +87,38 @@ fn select_kx_group(crypto_provider: &mut CryptoProvider, group: &str) {
         println!("Unknown group, using default groups");
         println!("Available groups: MLKEM512, MLKEM768, MLKEM1024, BikeL1, BikeL3, BikeL5, Hqc128, Hqc192, Hqc256, NtruPrimeSntrup761");
     }
+}
+
+fn load_x25519_keypair_from_pem(path: &str) -> Result<([u8; 32], [u8; 32]), Error> {
+    let pem = fs::read(path)
+        .map_err(|e| Error::General(format!("failed to read x25519 key file: {e}")))?;
+
+    let pkey = PKey::private_key_from_pem(&pem)
+        .map_err(|e| Error::General(format!("failed to parse x25519 private key PEM: {e}")))?;
+
+    if pkey.id() != Id::X25519 {
+        return Err(Error::General("provided key is not X25519".into()));
+    }
+
+    let raw_sk = pkey
+        .raw_private_key()
+        .map_err(|e| Error::General(format!("failed to extract raw x25519 private key: {e}")))?;
+
+    let raw_pk = pkey
+        .raw_public_key()
+        .map_err(|e| Error::General(format!("failed to extract raw x25519 public key: {e}")))?;
+
+    let sk: [u8; 32] = raw_sk
+        .as_slice()
+        .try_into()
+        .map_err(|_| Error::General("invalid raw x25519 private key length".into()))?;
+
+    let pk: [u8; 32] = raw_pk
+        .as_slice()
+        .try_into()
+        .map_err(|_| Error::General("invalid raw x25519 public key length".into()))?;
+
+    Ok((sk, pk))
 }
 
 // DTLS Helper Functions
@@ -287,23 +330,34 @@ fn main() {
         }
     };
 
-    let server_verifier = Arc::new(ClientVerifier::new(kemalg));
-
+    
     let kem = Kem::new(kemalg).expect("Failed to create kem instance");
-
+    
     let (public_key, secret_key) = kem
         .keypair()
         .expect("Failed to generate KEM keypair");
-
+    
     let signing_key = Arc::new(DummySigningKey);
-
-    let kem_key = Arc::new(MlKemKey::new(kemalg, secret_key.as_ref().to_vec()));
-
+    
+    let (kem_key, x25519_sk, x25519_pk) = match args.hybrid {
+        true => {
+            let path = args.x25519_key.expect("Invalid x25519 key path");
+            let (x25519_sk, x25519_pk) = load_x25519_keypair_from_pem(&path).expect("Failed to load x25519 keypair");
+            
+            let kem_key: Arc<dyn KemKey> = Arc::new(HybridKemKey::new(kemalg,secret_key.as_ref().to_vec(), x25519_sk));
+            (kem_key, Some(x25519_sk), Some(x25519_pk))
+        },
+        false => {
+            let kem_key: Arc<dyn KemKey> = Arc::new(PureKemKey::new(kemalg, secret_key.as_ref().to_vec()));
+            (kem_key, None, None)}
+        };
+        
     // Create our key pair structure
-    let key_pair = KeyPair::new(public_key, signing_key, Some(kem_key));
-
-    // Create our custom resolver
+    let key_pair = KeyPair::new(public_key, x25519_pk, signing_key, Some(kem_key));
+        
+    // Create our custom resolver and verifier
     let resolver = Arc::new(ClientCertResolver::new(key_pair));
+    let server_verifier = Arc::new(ClientVerifier::new(kemalg, x25519_sk, x25519_pk));
 
     let mut client_config = match args.client_auth {
         true => ClientConfig::builder_with_provider(crypto_provider.into())

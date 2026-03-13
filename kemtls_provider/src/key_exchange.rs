@@ -43,7 +43,7 @@ impl crypto::ActiveKeyExchange for KeyExchange {
             oqs::kem::Algorithm::Hqc128 => rustls::NamedGroup::Hqc128,
             oqs::kem::Algorithm::Hqc192 => rustls::NamedGroup::Hqc192,
             oqs::kem::Algorithm::Hqc256 => rustls::NamedGroup::Hqc256,
-            oqs::kem::Algorithm::NtruPrimeSntrup761 => rustls::NamedGroup::NtruPrimeStrup761,
+            oqs::kem::Algorithm::NtruPrimeSntrup761 => rustls::NamedGroup::NtruPrimeSntrup761,
             _ => rustls::NamedGroup::Unknown(0),
         }
     }
