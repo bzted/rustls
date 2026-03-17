@@ -517,6 +517,9 @@ enum_builder! {
         RSA_PSS_SHA512 => 0x0806,
         ED25519 => 0x0807,
         ED448 => 0x0808,
+        ML_DSA_44 => 0x0904,
+        ML_DSA_65 => 0x0905,
+        ML_DSA_87 => 0x0906
     }
 }
 
