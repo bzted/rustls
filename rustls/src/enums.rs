@@ -560,6 +560,9 @@ impl SignatureScheme {
                 | Self::RSA_PSS_SHA384
                 | Self::RSA_PSS_SHA256
                 | Self::ED25519
+                | Self::ML_DSA_44
+                | Self::ML_DSA_65
+                | Self::ML_DSA_87
         )
     }
 }
