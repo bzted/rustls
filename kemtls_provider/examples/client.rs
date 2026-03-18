@@ -1,4 +1,4 @@
-use kemtls_provider::provider;
+use kemtls_provider::{provider, DEFAULT_KX_GROUPS};
 use log::debug;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::CertificateDer;
@@ -258,9 +258,12 @@ fn main() {
         use_dtls = true;
     }
 
-    let crypto_provider = provider();
-
     let args = Args::parse();
+
+    let mut crypto_provider = provider();
+    if !args.pqc_provider {
+        crypto_provider.kx_groups = DEFAULT_KX_GROUPS.to_vec();
+    }
 
     let mut root_store = RootCertStore::empty();
     root_store.add_parsable_certificates(
@@ -277,29 +280,17 @@ fn main() {
 
     let pk = rustls::pki_types::PrivateKeyDer::from_pem_file(args.pk_file).unwrap();
 
-    let mut client_config = match (args.pqc_provider, args.client_auth) {
-        (true, true) => {
+    let mut client_config = match args.client_auth {
+        true => {
             ClientConfig::builder_with_provider(crypto_provider.into())
                 .with_safe_default_protocol_versions().unwrap()
                 .with_root_certificates(root_store)
                 .with_client_auth_cert(cert, pk).unwrap()
         }
 
-        (true, false) => {
+        false => {
             ClientConfig::builder_with_provider(crypto_provider.into())
                 .with_safe_default_protocol_versions().unwrap()
-                .with_root_certificates(root_store)
-                .with_no_client_auth()
-        }
-
-        (false, true) => {
-            ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_client_auth_cert(cert, pk).unwrap()
-        }
-
-        (false, false) => {
-            ClientConfig::builder()
                 .with_root_certificates(root_store)
                 .with_no_client_auth()
         }
