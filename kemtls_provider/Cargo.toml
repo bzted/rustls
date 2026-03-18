@@ -5,13 +5,15 @@ edition = "2021"
 
 [dependencies]
 oqs = { git = "https://github.com/bzted/liboqs-rust.git", branch = "main", features = ["non_portable"] }
+pki-types = { workspace = true } 
+webpki = {workspace = true, features = ["aws-lc-rs-unstable"]}
 rustls = { path = "../rustls"}
 log = "0.4.27"
 env_logger = "0.11.8"
 clap = { version = "4.0", features = ["derive"] }
-ring = "0.17.14"
 x25519-dalek = "2.0.1"
 openssl = { version = "0.10.76", features = ["vendored"] }
+aws-lc-rs = { workspace = true}
 
 [features] 
 dtls13 = ["rustls/dtls13"]

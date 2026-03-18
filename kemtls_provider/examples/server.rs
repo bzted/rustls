@@ -1,4 +1,4 @@
-use kemtls_provider::provider;
+use kemtls_provider::{provider, DEFAULT_KX_GROUPS};
 use log::debug;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
@@ -12,6 +12,7 @@ use std::net::{TcpListener, TcpStream, SocketAddr};
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use clap::Parser;
+
 
 const BUFFER_SIZE: usize = 4096;
 const TIMEOUT_SECS: u64 = 10; 
@@ -107,7 +108,15 @@ impl ClientState {
             ClientState::Connected { conn, response_sent, last_seen } => {
                 *last_seen = Instant::now();
                 let mut slice = packet;
-                conn.read_tls(&mut slice)?;
+                if let Err(e) = conn.read_tls(&mut slice) {
+                    let _ = Self::flush_output(conn, socket, addr);
+                    return Err(Box::new(e));
+                }
+                if let Err(e) = conn.process_new_packets() {
+                    let _ = Self::flush_output(conn, socket, addr);
+                    return Err(Box::new(e));
+                }
+
                 let io_state = conn.process_new_packets()?;
 
                 if io_state.plaintext_bytes_to_read() > 0 {
@@ -129,6 +138,30 @@ impl ClientState {
             }
         }
         Ok(false)
+    }
+
+    fn handle_timeout(
+        &mut self,
+        socket: &UdpSocket,
+        addr: SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match self {
+            ClientState::Connected { conn, .. } => {
+                if let Err(e) = conn.process_new_packets() {
+                    let mut alert_buf = Vec::new();
+                    if let Ok(len) = conn.write_dtls(&mut alert_buf) {
+                        if len > 0 {
+                            let _ = socket.send_to(&alert_buf, addr);
+                        }
+                    }
+                    return Err(Box::new(e));
+                }
+                Self::flush_output(conn, socket, addr)?;
+            }
+            ClientState::Handshaking { .. } => {
+            }
+        }
+        Ok(())
     }
 
     fn flush_output(conn: &mut ServerConnection, socket: &UdpSocket, addr: SocketAddr) -> Result<(), std::io::Error> {
@@ -181,16 +214,22 @@ fn run_dtls_server(server_config: ServerConfig, addr: String, port: u16, payload
         // Tick de mantenimiento
         let now = Instant::now();
         clients.retain(|addr, state| {
-            match state {
-                ClientState::Connected { conn, last_seen, .. } => {
-                    conn.process_new_packets().ok();
-                    let _ = ClientState::flush_output(conn, &socket, *addr);
-                    now.duration_since(*last_seen) < Duration::from_secs(TIMEOUT_SECS)
-                }
-                ClientState::Handshaking { last_seen, .. } => {
-                    now.duration_since(*last_seen) < Duration::from_secs(TIMEOUT_SECS)
-                }
+            let last = match state {
+                ClientState::Connected { last_seen, .. } => last_seen,
+                ClientState::Handshaking { last_seen, .. } => last_seen,
+            };
+
+            if now.duration_since(*last) > Duration::from_secs(TIMEOUT_SECS) {
+                println!("Timeout de inactividad: {}", addr);
+                return false;
             }
+
+            if let Err(e) = state.handle_timeout(&socket, *addr) {
+                println!("Error durante retransmisión {}: {:?}. Cerrando.", addr, e);
+                return false;
+            }
+
+            true
         });
 
         std::thread::sleep(Duration::from_millis(1));
@@ -288,37 +327,27 @@ fn main() {
     let cert = rustls::pki_types::CertificateDer::pem_file_iter(&args.cert_file)
         .expect("Could not read certificate file")
         .map(|cert| cert.expect("Error reading certificate"))
-        .collect();
-
+        .collect();    
     let pk = rustls::pki_types::PrivateKeyDer::from_pem_file(&args.pk_file).expect("Could not read private key file");
-
-    let verifier = WebPkiClientVerifier::builder(root_store.into()).build().unwrap();
+    
     // Set up TLS server with AuthKEM provider
-    let crypto_provider = provider();
+    let mut crypto_provider = provider();
+    if !args.pqc_provider {
+        crypto_provider.kx_groups = DEFAULT_KX_GROUPS.to_vec();
+    }
 
-    let mut server_config = match (args.pqc_provider, args.client_auth) {
-        (true, true) => {
+    let verifier = WebPkiClientVerifier::builder_with_provider(root_store.into(), Arc::new(crypto_provider.clone())).build().unwrap();
+
+    let mut server_config = match  args.client_auth {
+        true => {
             ServerConfig::builder_with_provider(crypto_provider.into())
                 .with_safe_default_protocol_versions().unwrap()
                 .with_client_cert_verifier(verifier)
                 .with_single_cert(cert, pk).unwrap()
         }
-
-        (true, false) => {
+        false => {
             ServerConfig::builder_with_provider(crypto_provider.into())
                 .with_safe_default_protocol_versions().unwrap()
-                .with_no_client_auth()
-                .with_single_cert(cert, pk).unwrap()
-        }
-
-        (false, true) => {
-            ServerConfig::builder()
-                .with_client_cert_verifier(verifier)
-                .with_single_cert(cert, pk).unwrap()
-        }
-
-        (false, false) => {
-            ServerConfig::builder()
                 .with_no_client_auth()
                 .with_single_cert(cert, pk).unwrap()
         }
