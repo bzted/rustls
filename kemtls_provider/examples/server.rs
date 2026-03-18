@@ -1,4 +1,4 @@
-use kemtls_provider::{provider, DEFAULT_KX_GROUPS};
+use kemtls_provider::{provider, get_kx_group_by_name, get_pq_kx_group_by_name, DEFAULT_KX_GROUPS};
 use log::debug;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
@@ -11,6 +11,7 @@ use rustls::ServerConnection;
 use std::net::{TcpListener, TcpStream, SocketAddr};
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
+use rustls::crypto::CryptoProvider;
 use clap::Parser;
 
 
@@ -20,7 +21,7 @@ const HTTP_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nConnection: closed\r\nContent-
 
 #[derive(Parser, Debug)]
 struct Args {
-    #[arg(long)]
+    #[arg(short, long)]
     group: Option<String>,
     #[arg(long)]
     cid: Option<u8>,
@@ -43,6 +44,27 @@ struct Args {
     #[arg(short = 'B', long, default_value_t = 1000)]
     payload_size: usize,
 }
+
+fn select_kx_group(crypto_provider: &mut CryptoProvider, group: &str, pqc: bool) {
+    match pqc {
+        true => {
+            if let Some(selected_group) = get_pq_kx_group_by_name(group) {
+                crypto_provider.kx_groups = vec![selected_group];
+            } else {
+                println!("Unknown group, using default groups");
+            }
+        }
+
+        false => {
+            if let Some(selected_group) = get_kx_group_by_name(group) {
+                crypto_provider.kx_groups = vec![selected_group];
+            } else {
+                println!("Unknown group, using default groups");
+            }
+        }
+    }
+}
+
 
 enum ClientState {
     Handshaking {
@@ -332,9 +354,18 @@ fn main() {
     
     // Set up TLS server with AuthKEM provider
     let mut crypto_provider = provider();
+
     if !args.pqc_provider {
         crypto_provider.kx_groups = DEFAULT_KX_GROUPS.to_vec();
     }
+    
+    if let Some(ref group_name) = args.group {
+        println!("Selecting KX group: {}", group_name);
+        select_kx_group(&mut crypto_provider, group_name, args.pqc_provider);
+    } else {
+        println!("Using all available KX groups");
+    }
+
 
     let verifier = WebPkiClientVerifier::builder_with_provider(root_store.into(), Arc::new(crypto_provider.clone())).build().unwrap();
 

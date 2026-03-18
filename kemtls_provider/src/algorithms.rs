@@ -568,7 +568,7 @@ pub static X25519NTRUPRIMESNTRUP761: &dyn SupportedKxGroup = &hybrid::Hybrid {
     },
 };
 
-pub fn get_kx_group_by_name(name: &str) -> Option<&'static dyn SupportedKxGroup> {
+pub fn get_pq_kx_group_by_name(name: &str) -> Option<&'static dyn SupportedKxGroup> {
     match name.to_uppercase().as_str() {
         "MLKEM512" => Some(&MLKEM512),
         "MLKEM768" => Some(&MLKEM768),
@@ -590,6 +590,15 @@ pub fn get_kx_group_by_name(name: &str) -> Option<&'static dyn SupportedKxGroup>
         "X25519HQC192" => Some(X25519HQC192),
         "X25519HQC256" => Some(X25519HQC256),
         "X25519NTRUPRIMESNTRUP761" => Some(X25519NTRUPRIMESNTRUP761),
+        _ => None,
+    }
+}
+
+pub fn get_kx_group_by_name(name: &str) -> Option<&'static dyn SupportedKxGroup> {
+    match name.to_uppercase().as_str() {
+        "X25519" => Some(X25519),
+        "SECP256R1" => Some(SECP256R1),
+        "SECP384R1" => Some(SECP384R1),
         _ => None,
     }
 }
