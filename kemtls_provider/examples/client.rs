@@ -1,4 +1,4 @@
-use kemtls_provider::{provider, DEFAULT_KX_GROUPS};
+use kemtls_provider::{provider, get_pq_kx_group_by_name, get_kx_group_by_name, DEFAULT_KX_GROUPS};
 use log::debug;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::CertificateDer;
@@ -9,6 +9,7 @@ use std::net::{TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
 use clap::Parser;
+use rustls::crypto::CryptoProvider;
 
 const BUFFER_SIZE: usize = 4096;
 const TIMEOUT_SECS: u64 = 1;
@@ -19,7 +20,7 @@ const TIMEOUT_SECS: u64 = 1;
 #[command(author, version, about = "KEMTLS/DTLS 1.3 Client")]
 struct Args {
     /// KX group to use (e.g. MLKEM768, BikeL3, Hqc192, NtruPrimeSntrup761)
-    #[arg(long)]
+    #[arg(short, long)]
     group: Option<String>,
 
     /// Optional CID value to offer in DTLS (0-255)
@@ -61,6 +62,26 @@ struct Args {
     /// Payload bytes to send after handshake
     #[arg(short = 'B', long, default_value = "1000")]
     payload_size: usize,
+}
+
+fn select_kx_group(crypto_provider: &mut CryptoProvider, group: &str, pqc: bool) {
+    match pqc {
+        true => {
+            if let Some(selected_group) = get_pq_kx_group_by_name(group) {
+                crypto_provider.kx_groups = vec![selected_group];
+            } else {
+                println!("Unknown group, using default groups");
+            }
+        }
+
+        false => {
+            if let Some(selected_group) = get_kx_group_by_name(group) {
+                crypto_provider.kx_groups = vec![selected_group];
+            } else {
+                println!("Unknown group, using default groups");
+            }
+        }
+    }
 }
 
 fn setup_udp_socket(server_addr: &str) -> Result<UdpSocket, std::io::Error> {
@@ -263,6 +284,13 @@ fn main() {
     let mut crypto_provider = provider();
     if !args.pqc_provider {
         crypto_provider.kx_groups = DEFAULT_KX_GROUPS.to_vec();
+    }
+
+    if let Some(ref group_name) = args.group {
+        println!("Selecting KX group: {}", group_name);
+        select_kx_group(&mut crypto_provider, group_name, args.pqc_provider);
+    } else {
+        println!("Using all available KX groups");
     }
 
     let mut root_store = RootCertStore::empty();
