@@ -25,7 +25,7 @@ struct Args {
     group: Option<String>,
     #[arg(long)]
     cid: Option<u8>,
-    #[arg(short = 'L', default_value_t = 1400)]
+    #[arg(short = 'L', default_value_t = 1300)]
     max_fragment_length: usize,
     #[arg(short = 'd', default_value_t = true, action = clap::ArgAction::SetFalse)]
     client_auth: bool,
