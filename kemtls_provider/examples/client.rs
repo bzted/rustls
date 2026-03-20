@@ -28,7 +28,7 @@ struct Args {
     cid: Option<u8>,
 
     /// Maximum fragment length for DTLS
-    #[arg(short = 'L', default_value_t = 1400)]
+    #[arg(short = 'L', default_value_t = 1300)]
     max_fragment_length: usize,
 
     /// Disables client authentication
