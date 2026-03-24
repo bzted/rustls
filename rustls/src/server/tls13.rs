@@ -449,7 +449,7 @@ mod client_hello {
             match (server_kem_key, authkem_psk_ss.is_some()) {
                 (Some(server_kem_key), false) => {
                     flight.finish(cx.common);
-                    Ok(Box::new(ExpectClientKemEncapsulation {
+                    Ok(Box::new(ExpectKemtlsEncapsulation {
                         config: Arc::clone(&self.config),
                         transcript: self.transcript,
                         key_schedule,
@@ -1273,7 +1273,7 @@ impl State<ServerConnectionData> for ExpectCertificate {
     }
 }
 
-struct ExpectClientKemEncapsulation {
+struct ExpectKemtlsEncapsulation {
     config: Arc<ServerConfig>,
     transcript: HandshakeHash,
     suite: &'static Tls13CipherSuite,
@@ -1283,7 +1283,7 @@ struct ExpectClientKemEncapsulation {
     server_key: Arc<dyn KemKey>,
     send_tickets: usize,
 }
-impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
+impl State<ServerConnectionData> for ExpectKemtlsEncapsulation {
     fn handle<'m>(
         mut self: Box<Self>,
         cx: &mut ServerContext<'_>,
@@ -1315,7 +1315,7 @@ impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
             );
 
         if self.client_auth {
-            Ok(Box::new(ExpectCertificateForClientAuth {
+            Ok(Box::new(ExpectKemtlsCertificate {
                 config: self.config,
                 transcript: self.transcript,
                 suite: self.suite,
@@ -1325,7 +1325,7 @@ impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
             }))
         } else {
             let key_schedule = auth_handhsake_key_schedule.into_main_secret(None);
-            Ok(Box::new(ExpectClientFinished {
+            Ok(Box::new(ExpectKemtlsFinished {
                 config: self.config,
                 transcript: self.transcript,
                 suite: self.suite,
@@ -1341,7 +1341,7 @@ impl State<ServerConnectionData> for ExpectClientKemEncapsulation {
     }
 }
 
-struct ExpectCertificateForClientAuth {
+struct ExpectKemtlsCertificate {
     config: Arc<ServerConfig>,
     transcript: HandshakeHash,
     suite: &'static Tls13CipherSuite,
@@ -1350,7 +1350,7 @@ struct ExpectCertificateForClientAuth {
     send_tickets: usize,
 }
 
-impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
+impl State<ServerConnectionData> for ExpectKemtlsCertificate {
     fn handle<'m>(
         mut self: Box<Self>,
         cx: &mut ServerContext<'_>,
@@ -1385,7 +1385,7 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
                 .key_schedule
                 .into_main_secret(None);
 
-            return Ok(Box::new(ExpectClientFinished {
+            return Ok(Box::new(ExpectKemtlsFinished {
                 config: self.config,
                 transcript: self.transcript,
                 suite: self.suite,
@@ -1425,7 +1425,7 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
 
         cx.common.peer_certificates = Some(owned_chain.clone());
 
-        Ok(Box::new(ExpectClientFinished {
+        Ok(Box::new(ExpectKemtlsFinished {
             config: self.config,
             transcript: self.transcript,
             suite: self.suite,
@@ -1440,7 +1440,7 @@ impl State<ServerConnectionData> for ExpectCertificateForClientAuth {
     }
 }
 
-struct ExpectClientFinished {
+struct ExpectKemtlsFinished {
     config: Arc<ServerConfig>,
     transcript: HandshakeHash,
     suite: &'static Tls13CipherSuite,
@@ -1448,7 +1448,7 @@ struct ExpectClientFinished {
     randoms: ConnectionRandoms,
     send_tickets: usize,
 }
-impl ExpectClientFinished {
+impl ExpectKemtlsFinished {
     fn emit_ticket(
         flight: &mut HandshakeFlightTls13<'_>,
         suite: &'static Tls13CipherSuite,
@@ -1510,7 +1510,7 @@ impl ExpectClientFinished {
         Ok(())
     }
 }
-impl State<ServerConnectionData> for ExpectClientFinished {
+impl State<ServerConnectionData> for ExpectKemtlsFinished {
     fn handle<'m>(
         mut self: Box<Self>,
         cx: &mut ServerContext<'_>,

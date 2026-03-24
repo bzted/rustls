@@ -1307,7 +1307,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
                         );
                         cx.common
                             .start_outgoing_traffic(&mut cx.sendable_plaintext);
-                        Ok(Box::new(ExpectServerFinished {
+                        Ok(Box::new(ExpectKemtlsFinished {
                             config: self.config,
                             server_name: self.server_name,
                             suite: self.suite,
@@ -1341,7 +1341,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
                         debug!("Client: Certificate sent");
                         flight.finish(cx.common);
 
-                        Ok(Box::new(ExpectServerKemEncapsulation {
+                        Ok(Box::new(ExpectKemtlsEncapsulation {
                             config: self.config,
                             server_name: self.server_name,
                             randoms: self.randoms,
@@ -1376,7 +1376,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
                 );
                 cx.common
                     .start_outgoing_traffic(&mut cx.sendable_plaintext);
-                Ok(Box::new(ExpectServerFinished {
+                Ok(Box::new(ExpectKemtlsFinished {
                     config: self.config,
                     server_name: self.server_name,
                     suite: self.suite,
@@ -1406,7 +1406,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
     }
 }
 
-struct ExpectServerKemEncapsulation {
+struct ExpectKemtlsEncapsulation {
     config: Arc<ClientConfig>,
     server_name: ServerName<'static>,
     randoms: ConnectionRandoms,
@@ -1417,7 +1417,7 @@ struct ExpectServerKemEncapsulation {
     cert_verified: verify::ServerCertVerified,
 }
 
-impl State<ClientConnectionData> for ExpectServerKemEncapsulation {
+impl State<ClientConnectionData> for ExpectKemtlsEncapsulation {
     fn handle<'m>(
         mut self: Box<Self>,
         cx: &mut ClientContext<'_>,
@@ -1477,7 +1477,7 @@ impl State<ClientConnectionData> for ExpectServerKemEncapsulation {
         cx.common
             .start_outgoing_traffic(&mut cx.sendable_plaintext);
 
-        Ok(Box::new(ExpectServerFinished {
+        Ok(Box::new(ExpectKemtlsFinished {
             config: self.config,
             server_name: self.server_name,
             suite: self.suite,
@@ -1493,7 +1493,7 @@ impl State<ClientConnectionData> for ExpectServerKemEncapsulation {
     }
 }
 
-struct ExpectServerFinished {
+struct ExpectKemtlsFinished {
     config: Arc<ClientConfig>,
     server_name: ServerName<'static>,
     suite: &'static Tls13CipherSuite,
@@ -1503,7 +1503,7 @@ struct ExpectServerFinished {
     cert_verified: verify::ServerCertVerified,
 }
 
-impl State<ClientConnectionData> for ExpectServerFinished {
+impl State<ClientConnectionData> for ExpectKemtlsFinished {
     fn handle<'m>(
         mut self: Box<Self>,
         cx: &mut ClientContext<'_>,
