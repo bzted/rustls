@@ -1,7 +1,7 @@
 use kemtls_provider::resolver::{KeyPair, ServerCertResolver};
 use kemtls_provider::sign::DummySigningKey;
 use kemtls_provider::verify::ServerVerifier;
-use kemtls_provider::{PureKemKey, get_kx_group_by_name, provider, HybridKemKey};
+use kemtls_provider::{PureKemKey, get_pq_kx_group_by_name, provider, HybridKemKey};
 use log::debug;
 use oqs::kem::Kem;
 use rustls::crypto::CryptoProvider;
@@ -81,7 +81,7 @@ fn get_kem_algorithm(algorithm: &str) -> Result<oqs::kem::Algorithm, String> {
 }
 
 fn select_kx_group(crypto_provider: &mut CryptoProvider, group: &str) {
-    if let Some(selected_group) = get_kx_group_by_name(group) {
+    if let Some(selected_group) = get_pq_kx_group_by_name(group) {
         crypto_provider.kx_groups = vec![selected_group];
     } else {
         println!("Unknown group, using default groups");
