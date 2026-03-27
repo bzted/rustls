@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use clap::Parser;
 use rustls::crypto::CryptoProvider;
+use std::cmp::Ordering;
 
 const BUFFER_SIZE: usize = 4096;
 const TIMEOUT_SECS: u64 = 1;
@@ -62,6 +63,26 @@ struct Args {
     /// Payload bytes to send after handshake
     #[arg(short = 'B', long, default_value = "1000")]
     payload_size: usize,
+
+    /// Iterations to bench
+    #[arg(short = 'n', long, default_value_t = 1)]
+    iterations: usize,
+
+    /// Warmup iterations
+    #[arg(long, default_value_t = 5)]
+    warmup: usize,
+
+    /// CSV file for results
+    #[arg(long)]
+    csv: Option<String>,
+
+    /// Incrementar puertos de cliente (para medidas)
+    #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
+    incremental_ports: bool,
+
+    /// Puerto inicial
+    #[arg(long, default_value_t = 50000)]
+    base_local_port: u16,
 }
 
 fn select_kx_group(crypto_provider: &mut CryptoProvider, group: &str, pqc: bool) {
@@ -84,8 +105,13 @@ fn select_kx_group(crypto_provider: &mut CryptoProvider, group: &str, pqc: bool)
     }
 }
 
-fn setup_udp_socket(server_addr: &str) -> Result<UdpSocket, std::io::Error> {
-    let socket = UdpSocket::bind("0.0.0.0:0")?;
+fn setup_udp_socket(server_addr: &str, local_port: Option<u16>) -> Result<UdpSocket, std::io::Error> {
+    let bind_addr = match local_port {
+        Some(port) => format!("0.0.0.0:{port}"),
+        None => "0.0.0.0:0".to_string(),
+    };
+
+    let socket = UdpSocket::bind(bind_addr)?;
     socket.connect(server_addr)?;
     socket.set_read_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
     socket.set_write_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
@@ -213,7 +239,7 @@ fn run_dtls_client(
     server_addr: &str,
     payload_size: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let socket = setup_udp_socket(server_addr)?;
+    let socket = setup_udp_socket(server_addr, Some(0 as u16))?;
     let mut conn = ClientConnection::new_dtls(Arc::new(client_config), server_name)?;
 
     perform_dtls_handshake(&socket, &mut conn)?;
@@ -338,7 +364,22 @@ fn main() {
             println!("Offering CID: {}", cid_val);
             client_config.set_cid(&[cid_val]);
         }
-        run_dtls_client(client_config, server_name, &server_addr, args.payload_size)
+        
+        if args.iterations > 1 || args.csv.is_some() {
+            run_dtls_benchmark(
+                client_config,
+                server_name,
+                &server_addr,
+                args.payload_size,
+                args.iterations,
+                args.warmup,
+                args.csv.as_deref(),
+                args.incremental_ports,
+                args.base_local_port,
+            )
+        } else {
+            run_dtls_client(client_config, server_name, &server_addr, args.payload_size)
+        }
     } else {
         run_tls_client(client_config, server_name, &server_addr)
     };
@@ -347,4 +388,342 @@ fn main() {
         eprintln!("Error: {:?}", e);
         std::process::exit(1);
     }
+}
+
+/// Benchmarks
+
+#[derive(Debug)]
+struct BenchRow {
+    iter: usize,
+    status: String,
+    handshake_ms: Option<f64>,
+    transaction_ms: Option<f64>,
+    error: Option<String>,
+}
+
+fn run_one_dtls_connection(
+    iter: usize,
+    client_config: Arc<ClientConfig>,
+    server_name: rustls::pki_types::ServerName<'static>,
+    server_addr: &str,
+    payload_size: usize,
+    local_port: Option<u16>,
+) -> BenchRow {
+    let socket = match setup_udp_socket(server_addr, local_port) {
+        Ok(s) => s,
+        Err(e) => {
+            return BenchRow {
+                iter,
+                status: "ERROR".to_string(),
+                handshake_ms: None,
+                transaction_ms: None,
+                error: Some(format!("socket: {}", e)),
+            };
+        }
+    };
+
+    let mut conn = match ClientConnection::new_dtls(client_config, server_name) {
+        Ok(c) => c,
+        Err(e) => {
+            return BenchRow {
+                iter,
+                status: "ERROR".to_string(),
+                handshake_ms: None,
+                transaction_ms: None,
+                error: Some(format!("conn: {}", e)),
+            };
+        }
+    };
+
+    let t0 = std::time::Instant::now();
+
+    if let Err(e) = perform_dtls_handshake(&socket, &mut conn) {
+        return BenchRow {
+            iter,
+            status: "ERROR".to_string(),
+            handshake_ms: None,
+            transaction_ms: None,
+            error: Some(format!("handshake: {}", e)),
+        };
+    }
+
+    let t1 = std::time::Instant::now();
+    let handshake_ms = t1.duration_since(t0).as_secs_f64() * 1000.0;
+
+    if let Err(e) = send_http_request(&socket, &mut conn, payload_size) {
+        return BenchRow {
+            iter,
+            status: "ERROR".to_string(),
+            handshake_ms: Some(handshake_ms),
+            transaction_ms: None,
+            error: Some(format!("send_app: {}", e)),
+        };
+    }
+
+    match receive_http_response(&socket, &mut conn) {
+        Ok(_response) => {
+            let t2 = std::time::Instant::now();
+            let transaction_ms = t2.duration_since(t0).as_secs_f64() * 1000.0;
+
+            BenchRow {
+                iter,
+                status: "OK".to_string(),
+                handshake_ms: Some(handshake_ms),
+                transaction_ms: Some(transaction_ms),
+                error: None,
+            }
+        }
+        Err(e) => BenchRow {
+            iter,
+            status: "ERROR".to_string(),
+            handshake_ms: Some(handshake_ms),
+            transaction_ms: None,
+            error: Some(format!("recv_app: {}", e)),
+        },
+    }
+}
+
+fn write_bench_csv(
+    path: &str,
+    rows: &[BenchRow],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut wtr = csv::Writer::from_path(path)?;
+    wtr.write_record([
+        "iter",
+        "status",
+        "handshake_ms",
+        "transaction_ms",
+        "error",
+    ])?;
+
+    for row in rows {
+        wtr.write_record([
+            row.iter.to_string(),
+            row.status.clone(),
+            row.handshake_ms.map(|v| format!("{:.4}", v)).unwrap_or_default(),
+            row.transaction_ms.map(|v| format!("{:.4}", v)).unwrap_or_default(),
+            row.error.clone().unwrap_or_default(),
+        ])?;
+    }
+
+    wtr.flush()?;
+    Ok(())
+}
+
+fn run_dtls_benchmark(
+    client_config: ClientConfig,
+    server_name: rustls::pki_types::ServerName<'static>,
+    server_addr: &str,
+    payload_size: usize,
+    iterations: usize,
+    warmup: usize,
+    csv_path: Option<&str>,
+    incremental_ports: bool,
+    base_local_port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let shared_config = Arc::new(client_config);
+
+    for i in 0..warmup {
+        let local_port = if incremental_ports {
+            Some(base_local_port.saturating_add(i as u16))
+        } else {
+            None
+        };
+
+        let _ = run_one_dtls_connection(
+            i,
+            shared_config.clone(),
+            server_name.clone(),
+            server_addr,
+            payload_size,
+            local_port
+        );
+    }
+
+    let mut rows = Vec::with_capacity(iterations);
+
+    for i in 1..=iterations {
+        let local_port = if incremental_ports {
+            Some(base_local_port.saturating_add((warmup + i) as u16))
+        } else {
+            None
+        };
+
+        let row = run_one_dtls_connection(
+            i,
+            shared_config.clone(),
+            server_name.clone(),
+            server_addr,
+            payload_size,
+            local_port,
+        );
+
+        if i % 100 == 0 || i == iterations {
+            println!("{} / {}", i, iterations);
+        }
+
+        rows.push(row);
+    }
+
+    if let Some(path) = csv_path {
+        write_bench_csv(path, &rows)?;
+
+        if let Some(stats) = compute_summary_stats(&rows) {
+            let summary_path = if let Some(base) = path.strip_suffix(".csv") {
+                format!("{}_summary.csv", base)
+            } else {
+                format!("{}_summary.csv", path)
+            };
+
+            write_summary_csv(&summary_path, &stats)?;
+
+            println!("Resumen guardado en: {}", summary_path);
+            println!("OK: {} / {}", stats.iterations_ok, stats.iterations_total);
+            println!("Media transaction_ms: {:.4} ms", stats.mean_ms);
+            println!("Mediana transaction_ms: {:.4} ms", stats.median_ms);
+            println!("Min transaction_ms: {:.4} ms", stats.min_ms);
+            println!("Max transaction_ms: {:.4} ms", stats.max_ms);
+            println!("Desviación estándar transaction_ms: {:.4} ms", stats.stddev_ms);
+        } else {
+            println!("No hay medidas válidas para calcular estadísticas.");
+        }
+    } else {
+        if let Some(stats) = compute_summary_stats(&rows) {
+            println!("OK: {} / {}", stats.iterations_ok, stats.iterations_total);
+            println!("Media transaction_ms: {:.4} ms", stats.mean_ms);
+            println!("Mediana transaction_ms: {:.4} ms", stats.median_ms);
+            println!("Min transaction_ms: {:.4} ms", stats.min_ms);
+            println!("Max transaction_ms: {:.4} ms", stats.max_ms);
+            println!("Desviación estándar transaction_ms: {:.4} ms", stats.stddev_ms);
+        } else {
+            println!("No hay medidas válidas para calcular estadísticas.");
+        }
+    };
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct SummaryStats {
+    iterations_total: usize,
+    iterations_ok: usize,
+    iterations_error: usize,
+    iterations_timeout: usize,
+
+    sum_ms: f64,
+    mean_ms: f64,
+    median_ms: f64,
+    min_ms: f64,
+    max_ms: f64,
+    stddev_ms: f64,
+}
+
+fn compute_percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return f64::NAN;
+    }
+
+    if sorted.len() == 1 {
+        return sorted[0];
+    }
+
+    let n = sorted.len() as f64;
+    let rank = p * (n - 1.0);
+    let lower = rank.floor() as usize;
+    let upper = rank.ceil() as usize;
+
+    if lower == upper {
+        sorted[lower]
+    } else {
+        let weight = rank - lower as f64;
+        sorted[lower] * (1.0 - weight) + sorted[upper] * weight
+    }
+}
+
+fn compute_summary_stats(rows: &[BenchRow]) -> Option<SummaryStats> {
+    let mut valid: Vec<f64> = rows
+        .iter()
+        .filter_map(|r| {
+            if r.status == "OK" {
+                r.transaction_ms
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let iterations_total = rows.len();
+    let iterations_ok = valid.len();
+    let iterations_error = rows.iter().filter(|r| r.status == "ERROR").count();
+    let iterations_timeout = rows
+        .iter()
+        .filter(|r| {
+            r.error
+                .as_deref()
+                .map(|e| e.to_ascii_lowercase().contains("timeout"))
+                .unwrap_or(false)
+        })
+        .count();
+
+    if valid.is_empty() {
+        return None;
+    }
+
+    valid.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+
+    let sum_ms: f64 = valid.iter().sum();
+    let mean_ms = sum_ms / valid.len() as f64;
+    let median_ms = compute_percentile(&valid, 0.50);
+    let min_ms = valid[0];
+    let max_ms = valid[valid.len() - 1];
+
+    let variance = if valid.len() > 1 {
+        valid.iter()
+            .map(|v| {
+                let d = *v - mean_ms;
+                d * d
+            })
+            .sum::<f64>()
+            / (valid.len() as f64 - 1.0)
+    } else {
+        0.0
+    };
+
+    let stddev_ms = variance.sqrt();
+
+    Some(SummaryStats {
+        iterations_total,
+        iterations_ok,
+        iterations_error,
+        iterations_timeout,
+        sum_ms,
+        mean_ms,
+        median_ms,
+        min_ms,
+        max_ms,
+        stddev_ms,
+    })
+}
+
+fn write_summary_csv(
+    path: &str,
+    stats: &SummaryStats,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut wtr = csv::Writer::from_path(path)?;
+    wtr.write_record(["metric", "value"])?;
+
+    wtr.write_record(["iterations_total", &stats.iterations_total.to_string()])?;
+    wtr.write_record(["iterations_ok", &stats.iterations_ok.to_string()])?;
+    wtr.write_record(["iterations_error", &stats.iterations_error.to_string()])?;
+    wtr.write_record(["iterations_timeout", &stats.iterations_timeout.to_string()])?;
+
+    wtr.write_record(["sum_ms", &format!("{:.4}", stats.sum_ms)])?;
+    wtr.write_record(["mean_ms", &format!("{:.4}", stats.mean_ms)])?;
+    wtr.write_record(["median_ms", &format!("{:.4}", stats.median_ms)])?;
+    wtr.write_record(["min_ms", &format!("{:.4}", stats.min_ms)])?;
+    wtr.write_record(["max_ms", &format!("{:.4}", stats.max_ms)])?;
+    wtr.write_record(["stddev_ms", &format!("{:.4}", stats.stddev_ms)])?;
+
+    wtr.flush()?;
+    Ok(())
 }
