@@ -1,18 +1,20 @@
 use std::boxed::Box;
-use aws_lc_rs::aead::quic::{Algorithm, HeaderProtectionKey, AES_128, AES_256, CHACHA20};
-use aws_lc_rs::error::Unspecified;
+//use aws_lc_rs::aead::quic::{Algorithm, HeaderProtectionKey, AES_128, AES_256, CHACHA20};
+//use aws_lc_rs::error::Unspecified;
+use ring::aead::quic::{Algorithm, HeaderProtectionKey, AES_128, AES_256, CHACHA20};
+use ring::error::Unspecified;
 use crate::CipherSuite;
 
-pub trait HeaderEncrypter: Send + Sync {
+pub(crate) trait HeaderEncrypter: Send + Sync {
     fn compute_mask(&self, sample: &[u8]) -> [u8; 5];
 }
 
-pub struct HeaderProtection {
+pub(crate) struct HeaderProtection {
     inner: HeaderProtectionKey,
 }
 
 impl HeaderProtection {
-    pub fn new(alg: &'static Algorithm, sn_key: &[u8]) -> Result<Self, Unspecified> {
+    pub(crate) fn new(alg: &'static Algorithm, sn_key: &[u8]) -> Result<Self, Unspecified> {
         let key = HeaderProtectionKey::new(alg, sn_key)?;
         Ok(Self { inner: key })
     }
@@ -31,7 +33,7 @@ impl HeaderEncrypter for HeaderProtection {
     }
 }
 
-pub fn create_header_protection(
+pub(crate) fn create_header_protection(
     suite: CipherSuite, 
     sn_key: &[u8]
 ) -> Box<dyn HeaderEncrypter> {
