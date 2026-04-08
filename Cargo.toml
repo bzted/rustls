@@ -98,3 +98,11 @@ zlib-rs = "0.4"
 [profile.bench]
 codegen-units = 1
 lto = true
+
+[profile.light]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

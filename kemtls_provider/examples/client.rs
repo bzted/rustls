@@ -8,7 +8,6 @@ use std::io::{stdout, Read, Write};
 use std::net::{TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
-use clap::Parser;
 use rustls::crypto::CryptoProvider;
 use std::cmp::Ordering;
 
@@ -17,72 +16,122 @@ const TIMEOUT_SECS: u64 = 1;
 
 // DTLS Helper Functions
 
-#[derive(Parser, Debug)]
-#[command(author, version, about = "KEMTLS/DTLS 1.3 Client")]
+
+#[derive(Debug, Clone)]
 struct Args {
-    /// KX group to use (e.g. MLKEM768, BikeL3, Hqc192, NtruPrimeSntrup761)
-    #[arg(short, long)]
     group: Option<String>,
-
-    /// Optional CID value to offer in DTLS (0-255)
-    #[arg(long)]
     cid: Option<u8>,
-
-    /// Maximum fragment length for DTLS
-    #[arg(short = 'L', default_value_t = 1300)]
     max_fragment_length: usize,
-
-    /// Disables client authentication
-    #[arg(short = 'd', default_value_t = true, action = clap::ArgAction::SetFalse)]
     client_auth: bool,
-
-    /// Certificate File
-    #[arg(short = 'c', default_value = "../test-ca/rsa-2048/client.fullchain")]
     cert_file: String,
-
-    /// Key file
-    #[arg(short = 'k', default_value = "../test-ca/rsa-2048/client.key")]
     pk_file: String,
-
-    /// Certificate Authority file
-    #[arg(short = 'A', default_value = "../test-ca/rsa-2048/ca.cert")]
     ca_file: String,
-
-    /// Port to listen on 
-    #[arg(short, long, default_value_t = 8443)]
     port: u16,
-
-    /// Address to connect to
-    #[arg(long, default_value = "127.0.0.1")]
     addr: String,
-
-    /// Activates PQC provider
-    #[arg(short = 'q' ,long, default_value_t = false, action = clap::ArgAction::SetTrue)]
     pqc_provider: bool,
-
-    /// Payload bytes to send after handshake
-    #[arg(short = 'B', long, default_value = "1000")]
     payload_size: usize,
-
-    /// Iterations to bench
-    #[arg(short = 'n', long, default_value_t = 1)]
     iterations: usize,
-
-    /// Warmup iterations
-    #[arg(long, default_value_t = 5)]
     warmup: usize,
-
-    /// CSV file for results
-    #[arg(long)]
     csv: Option<String>,
-
-    /// Incrementar puertos de cliente (para medidas)
-    #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
     incremental_ports: bool,
-
-    /// Puerto inicial
-    #[arg(long, default_value_t = 50000)]
     base_local_port: u16,
+}
+
+impl Default for Args {
+    fn default() -> Self {
+        Self {
+            group: None,
+            cid: None,
+            max_fragment_length: 1300,
+            client_auth: true,
+            cert_file: "../test-ca/rsa-2048/client.fullchain".to_string(),
+            pk_file: "../test-ca/rsa-2048/client.key".to_string(),
+            ca_file: "../test-ca/rsa-2048/ca.cert".to_string(),
+            port: 8443,
+            addr: "127.0.0.1".to_string(),
+            pqc_provider: false,
+            payload_size: 1000,
+            iterations: 1,
+            warmup: 5,
+            csv: None,
+            incremental_ports: false,
+            base_local_port: 50000,
+        }
+    }
+}
+
+fn print_help_and_exit() -> ! {
+    println!(
+        concat!(
+            "KEMTLS/DTLS 1.3 Client\n\n",
+            "Options:\n",
+            "  -g, --group <NAME>              KX group to use\n",
+            "      --cid <0-255>               Optional DTLS CID\n",
+            "  -L <N>                          Max fragment length (default: 1300)\n",
+            "  -d                              Disable client authentication\n",
+            "  -c <FILE>                       Certificate file\n",
+            "  -k <FILE>                       Private key file\n",
+            "  -A <FILE>                       CA certificate file\n",
+            "  -p, --port <PORT>               Port (default: 8443)\n",
+            "      --addr <ADDR>               Server address (default: 127.0.0.1)\n",
+            "  -q, --pqc-provider              Activate PQC provider\n",
+            "  -B, --payload-size <N>          Payload bytes (default: 1000)\n",
+            "  -n, --iterations <N>            Benchmark iterations (default: 1)\n",
+            "      --warmup <N>                Warmup iterations (default: 5)\n",
+            "      --csv <FILE>                CSV file for results\n",
+            "      --incremental-ports         Increment local ports for measurements\n",
+            "      --base-local-port <PORT>    Initial local port (default: 50000)\n",
+            "  -h, --help                      Show help\n",
+        )
+    );
+    std::process::exit(0);
+}
+
+fn parse_value<T: std::str::FromStr>(
+    iter: &mut std::iter::Peekable<impl Iterator<Item = String>>,
+    flag: &str,
+) -> Result<T, String> {
+    let value = iter.next().ok_or_else(|| format!("missing value for {flag}"))?;
+    value.parse::<T>().map_err(|_| format!("invalid value for {flag}: {value}"))
+}
+
+fn parse_args() -> Result<Args, String> {
+    let mut args = Args::default();
+    let mut iter = std::env::args().skip(1).peekable();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-h" | "--help" => print_help_and_exit(),
+            "-g" | "--group" => args.group = Some(parse_value(&mut iter, "--group")?),
+            "--cid" => args.cid = Some(parse_value(&mut iter, "--cid")?),
+            "-L" => args.max_fragment_length = parse_value(&mut iter, "-L")?,
+            "-d" => args.client_auth = false,
+            "-c" => args.cert_file = parse_value(&mut iter, "-c")?,
+            "-k" => args.pk_file = parse_value(&mut iter, "-k")?,
+            "-A" => args.ca_file = parse_value(&mut iter, "-A")?,
+            "-p" | "--port" => args.port = parse_value(&mut iter, "--port")?,
+            "--addr" => args.addr = parse_value(&mut iter, "--addr")?,
+            "-q" | "--pqc-provider" => args.pqc_provider = true,
+            "-B" | "--payload-size" => args.payload_size = parse_value(&mut iter, "--payload-size")?,
+            "-n" | "--iterations" => args.iterations = parse_value(&mut iter, "--iterations")?,
+            "--warmup" => args.warmup = parse_value(&mut iter, "--warmup")?,
+            "--csv" => args.csv = Some(parse_value(&mut iter, "--csv")?),
+            "--incremental-ports" => args.incremental_ports = true,
+            "--base-local-port" => args.base_local_port = parse_value(&mut iter, "--base-local-port")?,
+            _ if arg.starts_with("--group=") => args.group = Some(arg["--group=".len()..].to_string()),
+            _ if arg.starts_with("--cid=") => args.cid = Some(arg["--cid=".len()..].parse().map_err(|_| format!("invalid value for --cid: {}", &arg["--cid=".len()..]))?),
+            _ if arg.starts_with("--port=") => args.port = arg["--port=".len()..].parse().map_err(|_| format!("invalid value for --port: {}", &arg["--port=".len()..]))?,
+            _ if arg.starts_with("--addr=") => args.addr = arg["--addr=".len()..].to_string(),
+            _ if arg.starts_with("--payload-size=") => args.payload_size = arg["--payload-size=".len()..].parse().map_err(|_| format!("invalid value for --payload-size: {}", &arg["--payload-size=".len()..]))?,
+            _ if arg.starts_with("--iterations=") => args.iterations = arg["--iterations=".len()..].parse().map_err(|_| format!("invalid value for --iterations: {}", &arg["--iterations=".len()..]))?,
+            _ if arg.starts_with("--warmup=") => args.warmup = arg["--warmup=".len()..].parse().map_err(|_| format!("invalid value for --warmup: {}", &arg["--warmup=".len()..]))?,
+            _ if arg.starts_with("--csv=") => args.csv = Some(arg["--csv=".len()..].to_string()),
+            _ if arg.starts_with("--base-local-port=") => args.base_local_port = arg["--base-local-port=".len()..].parse().map_err(|_| format!("invalid value for --base-local-port: {}", &arg["--base-local-port=".len()..]))?,
+            _ => return Err(format!("unknown argument: {arg}")),
+        }
+    }
+
+    Ok(args)
 }
 
 fn select_kx_group(crypto_provider: &mut CryptoProvider, group: &str, pqc: bool) {
@@ -305,7 +354,10 @@ fn main() {
         use_dtls = true;
     }
 
-    let args = Args::parse();
+    let args = parse_args().unwrap_or_else(|e| {
+        eprintln!("Argument error: {e}");
+        std::process::exit(2);
+    });
 
     let mut crypto_provider = provider();
     if !args.pqc_provider {
