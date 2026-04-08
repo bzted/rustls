@@ -12,37 +12,116 @@ use std::net::{TcpListener, TcpStream, SocketAddr};
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use rustls::crypto::CryptoProvider;
-use clap::Parser;
 
 
 const BUFFER_SIZE: usize = 4096;
 const TIMEOUT_SECS: u64 = 10; 
 const HTTP_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nConnection: closed\r\nContent-Type: text/html\r\n\r\n<h1>Hello KEMTLS World!</h1>\r\n";
 
-#[derive(Parser, Debug)]
+
+#[derive(Debug, Clone)]
 struct Args {
-    #[arg(short, long)]
     group: Option<String>,
-    #[arg(long)]
     cid: Option<u8>,
-    #[arg(short = 'L', default_value_t = 1300)]
     max_fragment_length: usize,
-    #[arg(short = 'd', default_value_t = true, action = clap::ArgAction::SetFalse)]
     client_auth: bool,
-    #[arg(short = 'c', default_value = "../test-ca/rsa-2048/end.fullchain")]
     cert_file: String,
-    #[arg(short = 'k', default_value = "../test-ca/rsa-2048/end.key")]
     pk_file: String,
-    #[arg(short = 'A', default_value = "../test-ca/rsa-2048/ca.cert")]
     ca_file: String,
-    #[arg(short, long, default_value_t = 8443)]
     port: u16,
-    #[arg(long, default_value = "127.0.0.1")]
     addr: String,
-    #[arg(short = 'q' ,long, default_value_t = false, action = clap::ArgAction::SetTrue)]
     pqc_provider: bool,
-    #[arg(short = 'B', long, default_value_t = 1000)]
     payload_size: usize,
+}
+
+impl Default for Args {
+    fn default() -> Self {
+        Self {
+            group: None,
+            cid: None,
+            max_fragment_length: 1300,
+            client_auth: true,
+            cert_file: "../test-ca/rsa-2048/end.fullchain".to_string(),
+            pk_file: "../test-ca/rsa-2048/end.key".to_string(),
+            ca_file: "../test-ca/rsa-2048/ca.cert".to_string(),
+            port: 8443,
+            addr: "127.0.0.1".to_string(),
+            pqc_provider: false,
+            payload_size: 1000,
+        }
+    }
+}
+
+fn print_help_and_exit() -> ! {
+    println!(
+        concat!(
+            "Traditional TLS/DTLS server\n\n",
+            "Options:\n",
+            "  -g, --group <NAME>               KX group to use\n",
+            "      --cid <0-255>               Optional DTLS CID\n",
+            "  -L <N>                          Max fragment length (default: 1300)\n",
+            "  -d                              Disable client authentication\n",
+            "  -c <FILE>                       Certificate file\n",
+            "  -k <FILE>                       Private key file\n",
+            "  -A <FILE>                       CA certificate file\n",
+            "  -p, --port <PORT>               Port (default: 8443)\n",
+            "      --addr <ADDR>               Bind address (default: 127.0.0.1)\n",
+            "  -q, --pqc-provider              Enable PQC provider\n",
+            "  -B, --payload-size <N>          Payload bytes after handshake (default: 1000)\n",
+            "  -h, --help                      Show help\n",
+        )
+    );
+    std::process::exit(0);
+}
+
+fn parse_value<T: std::str::FromStr>(
+    iter: &mut std::iter::Peekable<impl Iterator<Item = String>>,
+    flag: &str,
+) -> Result<T, String> {
+    let value = iter.next().ok_or_else(|| format!("missing value for {flag}"))?;
+    value.parse::<T>().map_err(|_| format!("invalid value for {flag}: {value}"))
+}
+
+fn take_attached_or_next<T: std::str::FromStr>(
+    attached: Option<&str>,
+    iter: &mut std::iter::Peekable<impl Iterator<Item = String>>,
+    flag: &str,
+) -> Result<T, String> {
+    if let Some(v) = attached {
+        v.parse::<T>().map_err(|_| format!("invalid value for {flag}: {v}"))
+    } else {
+        parse_value(iter, flag)
+    }
+}
+
+fn parse_args() -> Result<Args, String> {
+    let mut args = Args::default();
+    let mut iter = std::env::args().skip(1).peekable();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-h" | "--help" => print_help_and_exit(),
+            "-g" | "--group" => args.group = Some(parse_value(&mut iter, "--group")?),
+            "--cid" => args.cid = Some(parse_value(&mut iter, "--cid")?),
+            "-L" => args.max_fragment_length = parse_value(&mut iter, "-L")?,
+            "-d" => args.client_auth = false,
+            "-c" => args.cert_file = parse_value(&mut iter, "-c")?,
+            "-k" => args.pk_file = parse_value(&mut iter, "-k")?,
+            "-A" => args.ca_file = parse_value(&mut iter, "-A")?,
+            "-p" | "--port" => args.port = parse_value(&mut iter, "--port")?,
+            "--addr" => args.addr = parse_value(&mut iter, "--addr")?,
+            "-q" | "--pqc-provider" => args.pqc_provider = true,
+            "-B" | "--payload-size" => args.payload_size = parse_value(&mut iter, "--payload-size")?,
+            _ if arg.starts_with("--group=") => args.group = Some(arg["--group=".len()..].to_string()),
+            _ if arg.starts_with("--cid=") => args.cid = Some(arg["--cid=".len()..].parse().map_err(|_| format!("invalid value for --cid: {}", &arg["--cid=".len()..]))?),
+            _ if arg.starts_with("--port=") => args.port = arg["--port=".len()..].parse().map_err(|_| format!("invalid value for --port: {}", &arg["--port=".len()..]))?,
+            _ if arg.starts_with("--addr=") => args.addr = arg["--addr=".len()..].to_string(),
+            _ if arg.starts_with("--payload-size=") => args.payload_size = arg["--payload-size=".len()..].parse().map_err(|_| format!("invalid value for --payload-size: {}", &arg["--payload-size=".len()..]))?,
+            _ => return Err(format!("unknown argument: {arg}")),
+        }
+    }
+
+    Ok(args)
 }
 
 fn select_kx_group(crypto_provider: &mut CryptoProvider, group: &str, pqc: bool) {
@@ -337,7 +416,10 @@ fn main() {
     }
 
     println!("Starting traditional server...");
-    let args = Args::parse();
+    let args = parse_args().unwrap_or_else(|e| {
+        eprintln!("Argument error: {e}");
+        std::process::exit(2);
+    });
 
     let mut root_store = RootCertStore::empty();
     root_store.add_parsable_certificates(
