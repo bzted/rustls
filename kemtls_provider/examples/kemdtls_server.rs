@@ -11,7 +11,6 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use clap::Parser;
 use std::collections::HashMap;
 use rustls::sign::KemKey;
 use openssl::pkey::{Id, PKey};
@@ -21,47 +20,97 @@ const BUFFER_SIZE: usize = 4096;
 const TIMEOUT_SECS: u64 = 1;
 const HTTP_RESPONSE: &[u8] = b"Hello from TLS Server!";
 
-#[derive(Parser, Debug)]
-#[command(about = "KEMTLS Server with TLS 1.3 and DTLS 1.3 support")]
+
+#[derive(Debug, Clone)]
 struct ServerArgs {
-    /// KEM algorithm to use for authentication
-    #[arg(short, long, default_value = "MLKEM768")]
     authkem: String,
-
-    /// KX group to offer
-    #[arg(short, long)]
     group: Option<String>,
-
-    /// Optional CID value to offer in DTLS (0-255)
-    #[arg(short, long)]
     cid: Option<u8>,
-
-    /// Max fragment length for DTLS 
-    #[arg(short = 'L', long, default_value_t = 1300)]
     max_fragment_length: usize,
-
-    /// Disable client authentication 
-    #[arg(short = 'd', long = "disable-client-auth", default_value_t = true, action = clap::ArgAction::SetFalse)]
     client_auth: bool,
-    
-    /// Port to listen on 
-    #[arg(short, long, default_value_t = 8443)]
     port: u16,
-
-    /// Address to bind to
-    #[arg(long, default_value = "127.0.0.1")]
     addr: String,
-
-    /// Payload bytes to send after handshake
-    #[arg(short = 'B', long, default_value = "1000")]
     payload_size: usize,
-
-    /// Enables hybrid KEMs
-    #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
     hybrid: bool,
-
-    #[arg(short = 'k', long)]
     x25519_key: Option<String>,
+}
+
+impl Default for ServerArgs {
+    fn default() -> Self {
+        Self {
+            authkem: "MLKEM768".to_string(),
+            group: None,
+            cid: None,
+            max_fragment_length: 1300,
+            client_auth: true,
+            port: 8443,
+            addr: "127.0.0.1".to_string(),
+            payload_size: 1000,
+            hybrid: false,
+            x25519_key: None,
+        }
+    }
+}
+
+fn print_help_and_exit() -> ! {
+    println!(
+        concat!(
+            "KEMTLS Server with TLS 1.3 and DTLS 1.3 support\n\n",
+            "Options:\n",
+            "  -a, --authkem <ALG>             Authentication KEM (default: MLKEM768)\n",
+            "  -g, --group <NAME>              KX group to offer\n",
+            "  -c, --cid <0-255>               Optional DTLS CID\n",
+            "  -L, --max-fragment-length <N>   Max fragment length (default: 1300)\n",
+            "  -d, --disable-client-auth       Disable client authentication\n",
+            "  -p, --port <PORT>               Port (default: 8443)\n",
+            "      --addr <ADDR>               Bind address (default: 127.0.0.1)\n",
+            "  -B, --payload-size <N>          Payload bytes after handshake (default: 1000)\n",
+            "      --hybrid                    Enable hybrid KEMs\n",
+            "  -k, --x25519-key <FILE>         X25519 private key PEM\n",
+            "  -h, --help                      Show help\n",
+        )
+    );
+    std::process::exit(0);
+}
+
+fn parse_value<T: std::str::FromStr>(
+    iter: &mut std::iter::Peekable<impl Iterator<Item = String>>,
+    flag: &str,
+) -> Result<T, String> {
+    let value = iter.next().ok_or_else(|| format!("missing value for {flag}"))?;
+    value.parse::<T>().map_err(|_| format!("invalid value for {flag}: {value}"))
+}
+
+fn parse_args() -> Result<ServerArgs, String> {
+    let mut args = ServerArgs::default();
+    let mut iter = std::env::args().skip(1).peekable();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-h" | "--help" => print_help_and_exit(),
+            "-a" | "--authkem" => args.authkem = parse_value(&mut iter, "--authkem")?,
+            "-g" | "--group" => args.group = Some(parse_value(&mut iter, "--group")?),
+            "-c" | "--cid" => args.cid = Some(parse_value(&mut iter, "--cid")?),
+            "-L" | "--max-fragment-length" => args.max_fragment_length = parse_value(&mut iter, "--max-fragment-length")?,
+            "-d" | "--disable-client-auth" => args.client_auth = false,
+            "-p" | "--port" => args.port = parse_value(&mut iter, "--port")?,
+            "--addr" => args.addr = parse_value(&mut iter, "--addr")?,
+            "-B" | "--payload-size" => args.payload_size = parse_value(&mut iter, "--payload-size")?,
+            "--hybrid" => args.hybrid = true,
+            "-k" | "--x25519-key" => args.x25519_key = Some(parse_value(&mut iter, "--x25519-key")?),
+            _ if arg.starts_with("--authkem=") => args.authkem = arg["--authkem=".len()..].to_string(),
+            _ if arg.starts_with("--group=") => args.group = Some(arg["--group=".len()..].to_string()),
+            _ if arg.starts_with("--cid=") => args.cid = Some(arg["--cid=".len()..].parse().map_err(|_| format!("invalid value for --cid: {}", &arg["--cid=".len()..]))?),
+            _ if arg.starts_with("--max-fragment-length=") => args.max_fragment_length = arg["--max-fragment-length=".len()..].parse().map_err(|_| format!("invalid value for --max-fragment-length: {}", &arg["--max-fragment-length=".len()..]))?,
+            _ if arg.starts_with("--port=") => args.port = arg["--port=".len()..].parse().map_err(|_| format!("invalid value for --port: {}", &arg["--port=".len()..]))?,
+            _ if arg.starts_with("--addr=") => args.addr = arg["--addr=".len()..].to_string(),
+            _ if arg.starts_with("--payload-size=") => args.payload_size = arg["--payload-size=".len()..].parse().map_err(|_| format!("invalid value for --payload-size: {}", &arg["--payload-size=".len()..]))?,
+            _ if arg.starts_with("--x25519-key=") => args.x25519_key = Some(arg["--x25519-key=".len()..].to_string()),
+            _ => return Err(format!("unknown argument: {arg}")),
+        }
+    }
+
+    Ok(args)
 }
 
 fn get_kem_algorithm(algorithm: &str) -> Result<oqs::kem::Algorithm, String> {
@@ -96,8 +145,8 @@ fn create_server_config(
     hybrid: bool,
     x25519_key_path: Option<String>,
 ) -> Result<ServerConfig, Box<dyn std::error::Error>> {
-    let kem = Kem::new(kemalg)?;
-    let (public_key, secret_key) = kem.keypair()?;
+    let kem = Kem::new(kemalg).map_err(|e| format!("Failed to create Kem instance: {e:?}"))?;
+    let (public_key, secret_key) = kem.keypair().map_err(|e| format!("Failed to generate Kem keypair: {e:?}"))?;
 
     let signing_key = Arc::new(DummySigningKey);
     
@@ -124,6 +173,7 @@ fn create_server_config(
     let mut server_config = match client_auth {
         true => ServerConfig::builder_with_provider(crypto_provider.into())
             .with_safe_default_protocol_versions()?
+            .enable_kemtls()
             .with_client_cert_verifier(client_verifier)
             .with_cert_resolver(resolver),
         false => ServerConfig::builder_with_provider(crypto_provider.into()).with_safe_default_protocol_versions()?.with_no_client_auth().with_cert_resolver(resolver)
@@ -252,6 +302,7 @@ enum ClientState {
     Connected {
         conn: ServerConnection,
         response_sent: bool,
+        received_app_data: usize,
         last_seen: Instant,
     },
 }
@@ -292,6 +343,7 @@ impl ClientState {
                         *self = ClientState::Connected {
                             conn,
                             response_sent: false,
+                            received_app_data: 0,
                             last_seen: Instant::now(),
                         };
                     }
@@ -305,7 +357,7 @@ impl ClientState {
                     }
                 }
             }
-            ClientState::Connected { conn, response_sent, last_seen } => {
+            ClientState::Connected { conn, response_sent, received_app_data, last_seen } => {
                 *last_seen = Instant::now();
                 let mut slice = packet;
                 if let Err(e) = conn.read_tls(&mut slice) {
@@ -323,9 +375,11 @@ impl ClientState {
                 if io_state.plaintext_bytes_to_read() > 0 {
                     let mut reader = conn.reader();
                     let mut discard = vec![0u8; io_state.plaintext_bytes_to_read()];
-                    reader.read_exact(&mut discard).ok();
+                    if reader.read_exact(&mut discard).is_ok() {
+                        *received_app_data += discard.len();
+                    }
 
-                    if !*response_sent {
+                    if !*response_sent && *received_app_data >= payload_size {
                         send_zero_payload(conn, payload_size)?;
                         *response_sent = true;
                     }
@@ -333,7 +387,7 @@ impl ClientState {
 
                 Self::write_pending(conn, socket, addr)?;
 
-                if *response_sent && !conn.wants_write() {
+                if *response_sent && *received_app_data >= payload_size && !conn.wants_write() {
                     return Ok(true); 
                 }
             }
@@ -463,7 +517,10 @@ fn main() {
         println!("Using DTLS 1.3");
     }
 
-    let args = ServerArgs::parse();
+    let args = parse_args().unwrap_or_else(|e| {
+        eprintln!("Argument error: {e}");
+        std::process::exit(2);
+    });
 
     println!("Starting KEMTLS Server...");
 

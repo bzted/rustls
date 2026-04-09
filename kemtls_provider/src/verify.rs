@@ -36,11 +36,11 @@ impl ClientVerifier {
 impl ServerCertVerifier for ClientVerifier {
     fn verify_server_cert(
         &self,
-        end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
-        server_name: &ServerName,
-        ocsp_response: &[u8],
-        now_time: rustls::pki_types::UnixTime,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName,
+        _ocsp_response: &[u8],
+        _now_time: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, Error> {
         Ok(rustls::client::danger::ServerCertVerified::assertion())
     }
@@ -48,8 +48,8 @@ impl ServerCertVerifier for ClientVerifier {
     fn verify_tls12_signature(
         &self,
         message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, Error> {
         debug!(
             "verify_tls12_signature called with {} bytes message",
@@ -63,8 +63,8 @@ impl ServerCertVerifier for ClientVerifier {
     fn verify_tls13_signature(
         &self,
         message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, Error> {
         debug!(
             "verify_tls13_signature called with {} bytes message",
@@ -82,11 +82,6 @@ impl ServerCertVerifier for ClientVerifier {
 
     fn requires_raw_public_keys(&self) -> bool {
         debug!("requires_raw_public_keys called - returning true");
-        true
-    }
-
-    fn authkem(&self) -> bool {
-        debug!("Trying authkem flow");
         true
     }
 
@@ -173,9 +168,9 @@ impl ClientCertVerifier for ServerVerifier {
 
     fn verify_client_cert(
         &self,
-        end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
-        now: rustls::pki_types::UnixTime,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::server::danger::ClientCertVerified, Error> {
         Ok(rustls::server::danger::ClientCertVerified::assertion())
     }
@@ -183,8 +178,8 @@ impl ClientCertVerifier for ServerVerifier {
     fn verify_tls12_signature(
         &self,
         message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, Error> {
         debug!(
             "verify_tls12_signature called with {} bytes message",
@@ -198,8 +193,8 @@ impl ClientCertVerifier for ServerVerifier {
     fn verify_tls13_signature(
         &self,
         message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, Error> {
         debug!(
             "verify_tls13_signature called with {} bytes message",
@@ -213,10 +208,6 @@ impl ClientCertVerifier for ServerVerifier {
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         debug!("supported_verify_schemes called");
         vec![rustls::SignatureScheme::ED25519]
-    }
-
-    fn authkem(&self) -> bool {
-        true
     }
 
     fn encapsulate(&self, client_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
@@ -258,9 +249,5 @@ impl ClientCertVerifier for ServerVerifier {
 
             return Ok((ct.as_ref().to_vec(), ss.as_ref().to_vec()))
         }
-    }
-
-    fn client_auth_mandatory(&self) -> bool {
-        false
     }
 }

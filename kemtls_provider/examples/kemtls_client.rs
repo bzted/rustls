@@ -1,81 +1,200 @@
+use std::cmp::Ordering;
 use std::convert::TryInto;
+use std::fs;
 use std::io::{stdout, Read, Write};
 use std::net::{TcpStream, UdpSocket};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use clap::Parser;
 use kemtls_provider::resolver::{ClientCertResolver, KeyPair};
 use kemtls_provider::sign::DummySigningKey;
 use kemtls_provider::verify::ClientVerifier;
-use kemtls_provider::{HybridKemKey, PureKemKey, get_pq_kx_group_by_name, provider};
+use kemtls_provider::{get_pq_kx_group_by_name, provider, HybridKemKey, PureKemKey};
 use log::debug;
+use openssl::pkey::{Id, PKey};
 use oqs::kem::Kem;
 use rustls::crypto::CryptoProvider;
 use rustls::sign::KemKey;
-use rustls::{ClientConfig, ClientConnection};
-use rustls::Error;
-use openssl::pkey::{Id, PKey};
-use std::fs;
-use std::cmp::Ordering;
-use std::time::Instant;
+use rustls::{ClientConfig, ClientConnection, Error};
 
 const BUFFER_SIZE: usize = 4096;
 const TIMEOUT_SECS: u64 = 1;
 
-#[derive(Parser, Debug)]
-#[command(about = "KEMTLS/DTLS 1.3 Client")]
+#[derive(Debug, Clone)]
 struct ClientArgs {
-    /// KX group to use (e.g. MLKEM768, BikeL3, Hqc192, NtruPrimeSntrup761)
-    #[arg(short, long)]
     group: Option<String>,
-
-    /// KEM algorithm to use for client authentication
-    #[arg(short, long, default_value = "MLKEM768")]
     authkem: String,
-
-    /// Optional CID value to offer in DTLS (0-255)
-    #[arg(short, long)]
     cid: Option<u8>,
-
-    /// Maximum fragment length for DTLS
-    #[arg(short = 'L', long, default_value_t = 1300)]
     max_fragment_length: usize,
-
-    /// Disables client authentication
-    #[arg(short = 'd', long = "client_auth", default_value_t = true, action = clap::ArgAction::SetFalse)]
     client_auth: bool,
-
-    /// Port to connect to
-    #[arg(short, long, default_value_t = 8443)]
     port: u16,
-
-    /// Address to connect to
-    #[arg(long, default_value = "127.0.0.1")]
     addr: String,
-
-    /// Payload bytes to send after handshake
-    #[arg(short = 'B', long, default_value = "1000")]
     payload_size: usize,
-
-    /// Enables hybrid KEMs
-    #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
     hybrid: bool,
-
-    #[arg(short = 'k', long, default_value = None)]
     x25519_key: Option<String>,
-
-    /// Iterations to bench
-    #[arg(short = 'n', long, default_value_t = 1)]
     iterations: usize,
-
-    /// Warmup iterations
-    #[arg(long, default_value_t = 5)]
     warmup: usize,
-
-    /// CSV file for results
-    #[arg(long)]
     csv: Option<String>,
+}
+
+impl Default for ClientArgs {
+    fn default() -> Self {
+        Self {
+            group: None,
+            authkem: "MLKEM768".to_string(),
+            cid: None,
+            max_fragment_length: 1300,
+            client_auth: true,
+            port: 8443,
+            addr: "127.0.0.1".to_string(),
+            payload_size: 1000,
+            hybrid: false,
+            x25519_key: None,
+            iterations: 1,
+            warmup: 5,
+            csv: None,
+        }
+    }
+}
+
+fn print_usage(program: &str) {
+    eprintln!(
+        r"Usage: {program} [options]
+         Options:
+           -g, --group <NAME>              KX group to use
+           -a, --authkem <NAME>            KEM algorithm for client authentication [default: MLKEM768]
+           -c, --cid <0-255>               Optional CID value to offer in DTLS
+           -L, --max-fragment-length <N>   Maximum fragment length for DTLS [default: 1300]
+           -d, --client_auth               Disable client authentication
+           -p, --port <PORT>               Port to connect to [default: 8443]
+           --addr <ADDR>               Address to connect to [default: 127.0.0.1]
+           -B, --payload-size <BYTES>      Payload bytes to send after handshake [default: 1000]
+               --hybrid                    Enable hybrid KEMs
+           -k, --x25519-key <PATH>         X25519 private key PEM path
+           -n, --iterations <N>            Iterations to bench [default: 1]
+               --warmup <N>                Warmup iterations [default: 5]
+               --csv <PATH>                CSV file for results
+           -h, --help                      Show this help message"
+    );
+}
+
+fn take_value<I>(it: &mut I, flag: &str) -> Result<String, String>
+where
+    I: Iterator<Item = String>,
+{
+    it.next()
+        .ok_or_else(|| format!("missing value for {flag}"))
+}
+
+fn parse_u8(value: &str, flag: &str) -> Result<u8, String> {
+    value
+        .parse::<u8>()
+        .map_err(|_| format!("invalid value for {flag}: {value}"))
+}
+
+fn parse_u16(value: &str, flag: &str) -> Result<u16, String> {
+    value
+        .parse::<u16>()
+        .map_err(|_| format!("invalid value for {flag}: {value}"))
+}
+
+fn parse_usize(value: &str, flag: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .map_err(|_| format!("invalid value for {flag}: {value}"))
+}
+
+fn parse_args() -> Result<ClientArgs, String> {
+    let mut args = ClientArgs::default();
+    let mut it = std::env::args();
+    let program = it.next().unwrap_or_else(|| "kem_c".to_string());
+
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print_usage(&program);
+                std::process::exit(0);
+            }
+            "-g" | "--group" => {
+                args.group = Some(take_value(&mut it, &arg)?);
+            }
+            "-a" | "--authkem" => {
+                args.authkem = take_value(&mut it, &arg)?;
+            }
+            "-c" | "--cid" => {
+                let v = take_value(&mut it, &arg)?;
+                args.cid = Some(parse_u8(&v, &arg)?);
+            }
+            "-L" | "--max-fragment-length" => {
+                let v = take_value(&mut it, &arg)?;
+                args.max_fragment_length = parse_usize(&v, &arg)?;
+            }
+            "-d" | "--client_auth" => {
+                args.client_auth = false;
+            }
+            "-p" | "--port" => {
+                let v = take_value(&mut it, &arg)?;
+                args.port = parse_u16(&v, &arg)?;
+            }
+            "--addr" => {
+                args.addr = take_value(&mut it, &arg)?;
+            }
+            "-B" | "--payload-size" => {
+                let v = take_value(&mut it, &arg)?;
+                args.payload_size = parse_usize(&v, &arg)?;
+            }
+            "--hybrid" => {
+                args.hybrid = true;
+            }
+            "-k" | "--x25519-key" => {
+                args.x25519_key = Some(take_value(&mut it, &arg)?);
+            }
+            "-n" | "--iterations" => {
+                let v = take_value(&mut it, &arg)?;
+                args.iterations = parse_usize(&v, &arg)?;
+            }
+            "--warmup" => {
+                let v = take_value(&mut it, &arg)?;
+                args.warmup = parse_usize(&v, &arg)?;
+            }
+            "--csv" => {
+                args.csv = Some(take_value(&mut it, &arg)?);
+            }
+            _ => {
+                if let Some(value) = arg.strip_prefix("--group=") {
+                    args.group = Some(value.to_string());
+                } else if let Some(value) = arg.strip_prefix("--authkem=") {
+                    args.authkem = value.to_string();
+                } else if let Some(value) = arg.strip_prefix("--cid=") {
+                    args.cid = Some(parse_u8(value, "--cid")?);
+                } else if let Some(value) = arg.strip_prefix("--max-fragment-length=") {
+                    args.max_fragment_length = parse_usize(value, "--max-fragment-length")?;
+                } else if let Some(value) = arg.strip_prefix("--port=") {
+                    args.port = parse_u16(value, "--port")?;
+                } else if let Some(value) = arg.strip_prefix("--addr=") {
+                    args.addr = value.to_string();
+                } else if let Some(value) = arg.strip_prefix("--payload-size=") {
+                    args.payload_size = parse_usize(value, "--payload-size")?;
+                } else if let Some(value) = arg.strip_prefix("--x25519-key=") {
+                    args.x25519_key = Some(value.to_string());
+                } else if let Some(value) = arg.strip_prefix("--iterations=") {
+                    args.iterations = parse_usize(value, "--iterations")?;
+                } else if let Some(value) = arg.strip_prefix("--warmup=") {
+                    args.warmup = parse_usize(value, "--warmup")?;
+                } else if let Some(value) = arg.strip_prefix("--csv=") {
+                    args.csv = Some(value.to_string());
+                } else {
+                    return Err(format!("unknown argument: {arg}"));
+                }
+            }
+        }
+    }
+
+    if args.hybrid && args.x25519_key.is_none() {
+        return Err("--hybrid requires --x25519-key <PATH>".to_string());
+    }
+
+    Ok(args)
 }
 
 fn get_kem_algorithm(algorithm: &str) -> Result<oqs::kem::Algorithm, String> {
@@ -135,8 +254,6 @@ fn load_x25519_keypair_from_pem(path: &str) -> Result<([u8; 32], [u8; 32]), Erro
     Ok((sk, pk))
 }
 
-// DTLS Helper Functions
-
 fn setup_udp_socket(server_addr: &str) -> Result<UdpSocket, std::io::Error> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     socket.set_nonblocking(true)?;
@@ -151,15 +268,15 @@ fn send_dtls_datagram(
     conn: &mut ClientConnection,
 ) -> Result<(), std::io::Error> {
     while conn.wants_write() {
-            let mut out_buf = Vec::new();
-            match conn.write_dtls(&mut out_buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    debug!("DTLS datagram len = {} bytes", n);
-                    socket.send(&out_buf)?;
-                }
-                Err(e) => return Err(e),
+        let mut out_buf = Vec::new();
+        match conn.write_dtls(&mut out_buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                debug!("DTLS datagram len = {} bytes", n);
+                socket.send(&out_buf)?;
             }
+            Err(e) => return Err(e),
+        }
     }
     Ok(())
 }
@@ -215,13 +332,13 @@ fn receive_http_response(
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut in_buf = [0u8; BUFFER_SIZE];
     let mut plaintext = Vec::new();
-    
+
     while plaintext.len() < expected_size {
         let mut tmp = [0u8; BUFFER_SIZE];
         loop {
             let mut reader = conn.reader();
             match reader.read(&mut tmp) {
-                Ok(0) => break, 
+                Ok(0) => break,
                 Ok(n) => {
                     plaintext.extend_from_slice(&tmp[..n]);
                 }
@@ -262,7 +379,6 @@ fn run_dtls_client(
     let mut conn = ClientConnection::new_dtls(Arc::new(client_config), server_name)?;
 
     perform_dtls_handshake(&socket, &mut conn)?;
-
     send_http_request(&socket, &mut conn, payload_size)?;
 
     let response = receive_http_response(&socket, &mut conn, payload_size)?;
@@ -296,15 +412,8 @@ fn run_tls_client(
         .as_bytes(),
     )?;
 
-    let cs = tls_stream
-        .conn
-        .negotiated_cipher_suite()
-        .unwrap();
-    writeln!(
-        &mut std::io::stderr(),
-        "Current ciphersuite: {:?}",
-        cs.suite()
-    )?;
+    let cs = tls_stream.conn.negotiated_cipher_suite().unwrap();
+    writeln!(&mut std::io::stderr(), "Current ciphersuite: {:?}", cs.suite())?;
 
     let mut plaintext = Vec::new();
     tls_stream.read_to_end(&mut plaintext)?;
@@ -322,7 +431,15 @@ fn main() {
         use_dtls = true;
     }
 
-    let args = ClientArgs::parse();
+    let args = match parse_args() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("Argument error: {e}");
+            let program = std::env::args().next().unwrap_or_else(|| "kem_c".to_string());
+            print_usage(&program);
+            std::process::exit(2);
+        }
+    };
 
     let server_addr = format!("{}:{}", args.addr, args.port);
     let server_name = "servername".try_into().unwrap();
@@ -361,7 +478,6 @@ fn main() {
     }
 }
 
-
 #[derive(Debug, Clone)]
 struct BenchRow {
     iter: usize,
@@ -378,7 +494,6 @@ struct SummaryStats {
     iterations_ok: usize,
     iterations_error: usize,
     iterations_timeout: usize,
-
     sum_ms: f64,
     mean_ms: f64,
     median_ms: f64,
@@ -411,19 +526,14 @@ fn compute_percentile(sorted: &[f64], p: f64) -> f64 {
 fn compute_summary_stats(rows: &[BenchRow]) -> Option<SummaryStats> {
     let mut valid: Vec<f64> = rows
         .iter()
-        .filter_map(|r| {
-            if r.status == "OK" {
-                r.transaction_ms
-            } else {
-                None
-            }
-        })
+        .filter_map(|r| if r.status == "OK" { r.transaction_ms } else { None })
         .collect();
 
     let iterations_total = rows.len();
     let iterations_ok = valid.len();
     let iterations_error = rows.iter().filter(|r| r.status == "ERROR").count();
-    let iterations_timeout = rows.iter()
+    let iterations_timeout = rows
+        .iter()
         .filter(|r| {
             r.error
                 .as_deref()
@@ -445,7 +555,8 @@ fn compute_summary_stats(rows: &[BenchRow]) -> Option<SummaryStats> {
     let max_ms = valid[valid.len() - 1];
 
     let variance = if valid.len() > 1 {
-        valid.iter()
+        valid
+            .iter()
             .map(|v| {
                 let d = *v - mean_ms;
                 d * d
@@ -472,10 +583,7 @@ fn compute_summary_stats(rows: &[BenchRow]) -> Option<SummaryStats> {
     })
 }
 
-fn write_bench_csv(
-    path: &str,
-    rows: &[BenchRow],
-) -> Result<(), Box<dyn std::error::Error>> {
+fn write_bench_csv(path: &str, rows: &[BenchRow]) -> Result<(), Box<dyn std::error::Error>> {
     let mut wtr = csv::Writer::from_path(path)?;
     wtr.write_record([
         "iter",
@@ -491,8 +599,12 @@ fn write_bench_csv(
             row.iter.to_string(),
             row.status.clone(),
             row.setup_ms.map(|v| format!("{:.4}", v)).unwrap_or_default(),
-            row.handshake_ms.map(|v| format!("{:.4}", v)).unwrap_or_default(),
-            row.transaction_ms.map(|v| format!("{:.4}", v)).unwrap_or_default(),
+            row.handshake_ms
+                .map(|v| format!("{:.4}", v))
+                .unwrap_or_default(),
+            row.transaction_ms
+                .map(|v| format!("{:.4}", v))
+                .unwrap_or_default(),
             row.error.clone().unwrap_or_default(),
         ])?;
     }
@@ -539,8 +651,8 @@ fn build_kemtls_client_config(
     let kemalg = get_kem_algorithm(&args.authkem)
         .map_err(|e| format!("Error with authkem algorithm: {}", e))?;
 
-    let kem = Kem::new(kemalg)?;
-    let (public_key, secret_key) = kem.keypair()?;
+    let kem = Kem::new(kemalg).map_err(|e| format!("Failed to create Kem instance: {e:?}"))?;
+    let (public_key, secret_key) = kem.keypair().map_err(|e| format!("Failed to generate Kem keypair: {e:?}"))?;
 
     let signing_key = Arc::new(DummySigningKey);
 
@@ -579,6 +691,7 @@ fn build_kemtls_client_config(
 
     client_config.resumption = rustls::client::Resumption::disabled();
     client_config.max_fragment_size = Some(args.max_fragment_length);
+    client_config.kemtls_enabled = true;
 
     if let Some(cid_val) = args.cid {
         client_config.set_cid(&[cid_val]);
@@ -682,36 +795,36 @@ fn run_dtls_kemtls_benchmark(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut rows = Vec::with_capacity(args.iterations);
 
-        let client_config = build_kemtls_client_config(args)?;
-        let shared_config = Arc::new(client_config);
+    let client_config = build_kemtls_client_config(args)?;
+    let shared_config = Arc::new(client_config);
 
-        for i in 0..args.warmup {
-            let _ = run_one_dtls_connection(
-                i,
-                shared_config.clone(),
-                server_name.clone(),
-                server_addr,
-                args.payload_size,
-                None,
-            );
+    for i in 0..args.warmup {
+        let _ = run_one_dtls_connection(
+            i,
+            shared_config.clone(),
+            server_name.clone(),
+            server_addr,
+            args.payload_size,
+            None,
+        );
+    }
+
+    for i in 1..=args.iterations {
+        let row = run_one_dtls_connection(
+            i,
+            shared_config.clone(),
+            server_name.clone(),
+            server_addr,
+            args.payload_size,
+            None,
+        );
+
+        if i % 100 == 0 || i == args.iterations {
+            println!("{} / {}", i, args.iterations);
         }
 
-        for i in 1..=args.iterations {
-            let row = run_one_dtls_connection(
-                i,
-                shared_config.clone(),
-                server_name.clone(),
-                server_addr,
-                args.payload_size,
-                None,
-            );
-
-            if i % 100 == 0 || i == args.iterations {
-                println!("{} / {}", i, args.iterations);
-            }
-
-            rows.push(row);
-        }
+        rows.push(row);
+    }
 
     if let Some(path) = args.csv.as_deref() {
         write_bench_csv(path, &rows)?;
@@ -732,8 +845,10 @@ fn run_dtls_kemtls_benchmark(
             println!("Median transaction_ms: {:.4}", stats.median_ms);
             println!("Min transaction_ms: {:.4} ms", stats.min_ms);
             println!("Max transaction_ms: {:.4} ms", stats.max_ms);
-            println!("Desviación estándar transaction_ms: {:.4} ms", stats.stddev_ms);
-
+            println!(
+                "Desviación estándar transaction_ms: {:.4} ms",
+                stats.stddev_ms
+            );
         } else {
             println!("No hay medidas válidas para calcular estadísticas.");
         }
@@ -743,7 +858,10 @@ fn run_dtls_kemtls_benchmark(
         println!("Median transaction_ms: {:.4}", stats.median_ms);
         println!("Min transaction_ms: {:.4} ms", stats.min_ms);
         println!("Max transaction_ms: {:.4} ms", stats.max_ms);
-        println!("Desviación estándar transaction_ms: {:.4} ms", stats.stddev_ms);
+        println!(
+            "Desviación estándar transaction_ms: {:.4} ms",
+            stats.stddev_ms
+        );
     }
 
     Ok(())

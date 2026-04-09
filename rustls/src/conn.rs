@@ -5,6 +5,7 @@ use core::ops::{Deref, DerefMut, Range};
 use log::debug;
 #[cfg(feature = "std")]
 use std::io;
+use std::collections::BTreeMap;
 use std::vec::Vec;
 
 use crate::common_state::{CommonState, Context, IoState, State, DEFAULT_BUFFER_LIMIT};
@@ -20,7 +21,6 @@ use crate::msgs::handshake::Random;
 use crate::msgs::message::{
     InboundPlainMessage, InboundPlainMessageOwned, Message, MessagePayload, ProcessedMessage,
 };
-use crate::record_common::IncomingRecord;
 use crate::record_layer::Decrypted;
 use crate::suites::{ExtractedSecrets, PartiallyExtractedSecrets};
 use crate::vecbuf::ChunkVecBuffer;
@@ -862,6 +862,8 @@ pub(crate) struct ConnectionCore<Data> {
     pub(crate) common_state: CommonState,
     pub(crate) hs_deframer: HandshakeDeframer,
     pub(crate) dtls_reassembler: DtlsReassembler,
+    dtls_expected_inbound_seq: u16,
+    dtls_pending_handshake: BTreeMap<u16, InboundPlainMessageOwned>,
 
     /// We limit consecutive empty fragments to avoid a route for the peer to send
     /// us significant but fruitless traffic.
@@ -876,8 +878,17 @@ impl<Data> ConnectionCore<Data> {
             common_state,
             hs_deframer: HandshakeDeframer::default(),
             dtls_reassembler: DtlsReassembler::new(),
+            dtls_expected_inbound_seq: 0,
+            dtls_pending_handshake: BTreeMap::new(),
             seen_consecutive_empty_fragments: 0,
         }
+    }
+
+    fn take_next_buffered_dtls_handshake(&mut self) -> Option<ProcessedMessage<'static>> {
+        let seq = self.dtls_expected_inbound_seq;
+        let message = self.dtls_pending_handshake.remove(&seq)?;
+        self.dtls_expected_inbound_seq = self.dtls_expected_inbound_seq.wrapping_add(1);
+        Some(ProcessedMessage::Owned(message))
     }
 
     pub(crate) fn process_new_packets(
@@ -975,6 +986,12 @@ impl<Data> ConnectionCore<Data> {
         buffer: &'b mut [u8],
         buffer_progress: &mut BufferProgress,
     ) -> Result<Option<ProcessedMessage<'b>>, Error> {
+        if self.common_state.is_dtls() {
+            if let Some(message) = self.take_next_buffered_dtls_handshake() {
+                return Ok(Some(message));
+            }
+        }
+
         // before processing any more of `buffer`, return any extant messages from `hs_deframer`
         if self.hs_deframer.has_message_ready() {
             Ok(self.take_handshake_message(buffer, buffer_progress))
@@ -1148,7 +1165,7 @@ impl<Data> ConnectionCore<Data> {
             let message = unborrowed.reborrow(&Delocator::new(buffer));
             if version_is_dtls13 {
                 match self.process_dtls_fragment(message.payload)? {
-                    Some((typ, complete_payload)) => {
+                    Some((seq, typ, complete_payload)) => {
                         let mut complete_msg = Vec::with_capacity(complete_payload.len() + 4);
                         typ.encode(&mut complete_msg);
                         u24(complete_payload.len() as u32).encode(&mut complete_msg);
@@ -1162,7 +1179,18 @@ impl<Data> ConnectionCore<Data> {
                             payload: complete_msg,
                         };
                         buffer_progress.add_discard(processed);
-                        return Ok(Some(ProcessedMessage::Owned(full_message)));
+
+                        if seq == self.dtls_expected_inbound_seq {
+                            self.dtls_expected_inbound_seq =
+                                self.dtls_expected_inbound_seq.wrapping_add(1);
+                            return Ok(Some(ProcessedMessage::Owned(full_message)));
+                        }
+
+                        if seq > self.dtls_expected_inbound_seq {
+                            self.dtls_pending_handshake.insert(seq, full_message);
+                        }
+
+                        continue;
                     }
                     None => {
                         buffer_progress.add_discard(processed);
@@ -1265,18 +1293,19 @@ impl<Data> ConnectionCore<Data> {
     pub(crate) fn process_dtls_fragment(
         &mut self,
         payload: &[u8],
-    ) -> Result<Option<(HandshakeType, Vec<u8>)>, Error> {
+    ) -> Result<Option<(u16, HandshakeType, Vec<u8>)>, Error> {
         use crate::msgs::codec::{Codec, Reader};
         let mut reader = Reader::init(payload);
         let fragment = DtlsFragment::read(&mut reader)?;
 
         let typ = fragment.typ;
+        let seq = fragment.message_seq;
 
         if let Some(msg) = self
             .dtls_reassembler
             .add_fragment(fragment)?
         {
-            return Ok(Some((typ, msg)));
+            return Ok(Some((seq, typ, msg)));
         }
 
         Ok(None)

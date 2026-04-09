@@ -11,6 +11,24 @@ Rustls is a modern TLS library written in Rust.
 This new version includes a DTLS 1.3 implementation in rustls, according to [RFC9147](https://datatracker.ietf.org/doc/html/rfc9147).
 It has been tested against Wolfssl for interoperability.
 
+## Light profile
+A light profile has been added for reducing the examples size. To select it:
+
+```
+cargo run --example kem_s --features dtls13 --profile light -- "args"
+cargo run --example server --features dtls13 --profile light -- "args"
+
+cargo run --example kem_c --features dtls13 --profile light -- "args"
+cargo run --example client --features dtls13 --profile light -- "args"
+```
+Mldsa support has also been implemented. To enable it:
+
+```
+cargo run --example server --features "dtls13 mldsa" --profile light -- "args"
+
+cargo run --example client --features "dtls13 mldsa" --profile light -- "args"
+```
+
 # Documentation
 
 https://docs.rs/rustls/

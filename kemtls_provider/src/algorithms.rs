@@ -4,7 +4,7 @@ use alloc::boxed::Box;
 use crypto::SupportedKxGroup;
 use oqs::kem::Kem;
 use rustls::crypto::{self, CompletedKeyExchange, SharedSecret};
-use crypto::aws_lc_rs::kx_group::{X25519, SECP256R1, SECP384R1};
+use crypto::ring::kx_group::{X25519, SECP256R1, SECP384R1};
 use crate::hybrid;
 
 pub const KX_GROUPS: &[&dyn SupportedKxGroup] = &[

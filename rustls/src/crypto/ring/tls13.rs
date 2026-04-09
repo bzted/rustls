@@ -5,7 +5,7 @@ use super::ring_like::{aead, hkdf, hmac};
 use crate::crypto;
 use crate::crypto::cipher::{
     AeadKey, InboundOpaqueMessage, Iv, MessageDecrypter, MessageEncrypter, Nonce,
-    Tls13AeadAlgorithm, UnsupportedOperationError, make_tls13_aad,
+    Tls13AeadAlgorithm, UnsupportedOperationError, make_tls13_aad, make_dtls13_aad,
 };
 use crate::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock, OutputLengthError};
 use crate::enums::{CipherSuite, ContentType, ProtocolVersion};
@@ -210,21 +210,35 @@ impl MessageEncrypter for Tls13MessageEncrypter {
         let mut payload = PrefixedPayload::with_capacity(total_len);
 
         let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).0);
-        let aad = aead::Aad::from(make_tls13_aad(total_len));
+        //let aad = aead::Aad::from(make_tls13_aad(total_len));
         payload.extend_from_chunks(&msg.payload);
         payload.extend_from_slice(&msg.typ.to_array());
 
-        self.enc_key
-            .seal_in_place_append_tag(nonce, aad, &mut payload)
-            .map_err(|_| Error::EncryptError)?;
+        if let Some((epoch, cid, is_16bit_seq)) = &msg.dtls_params {
+            let dtls_aad = make_dtls13_aad(*epoch, seq, total_len, cid.as_deref(), *is_16bit_seq);
+            let aad = aead::Aad::from(dtls_aad.as_slice());
+            self.enc_key
+                .seal_in_place_append_tag(nonce, aad, &mut payload)
+                .map_err(|_| Error::EncryptError)?;
+            Ok(OutboundOpaqueMessage::new(
+                ContentType::ApplicationData,
+                ProtocolVersion::DTLSv1_2,
+                payload,
+            ))
+        } else {
+            let default_aad = make_tls13_aad(total_len);
+            let aad = aead::Aad::from(default_aad);
+            
+            self.enc_key
+                .seal_in_place_append_tag(nonce, aad, &mut payload)
+                .map_err(|_| Error::EncryptError)?;
 
-        Ok(OutboundOpaqueMessage::new(
-            ContentType::ApplicationData,
-            // Note: all TLS 1.3 application data records use TLSv1_2 (0x0303) as the legacy record
-            // protocol version, see https://www.rfc-editor.org/rfc/rfc8446#section-5.1
-            ProtocolVersion::TLSv1_2,
-            payload,
-        ))
+            Ok(OutboundOpaqueMessage::new(
+                ContentType::ApplicationData,
+                ProtocolVersion::TLSv1_2,
+                payload,
+            ))
+        }
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
@@ -244,12 +258,20 @@ impl MessageDecrypter for Tls13MessageDecrypter {
         }
 
         let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).0);
-        let aad = aead::Aad::from(make_tls13_aad(payload.len()));
-        let plain_len = self
-            .dec_key
-            .open_in_place(nonce, aad, payload)
-            .map_err(|_| Error::DecryptError)?
-            .len();
+        let plain_len = if let Some(custom_aad) = &msg.dtls_aad {
+            let aad = aead::Aad::from(custom_aad.as_slice());
+            self.dec_key
+                .open_in_place(nonce, aad, payload)
+                .map_err(|_| Error::DecryptError)?
+                .len()
+        } else {
+            let default_aad = make_tls13_aad(payload.len());
+            let aad = aead::Aad::from(default_aad);
+            self.dec_key
+                .open_in_place(nonce, aad, payload)
+                .map_err(|_| Error::DecryptError)?
+                .len()
+        };
 
         payload.truncate(plain_len);
         msg.into_tls13_unpadded_message()
