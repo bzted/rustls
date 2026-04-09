@@ -691,7 +691,7 @@ fn build_kemtls_client_config(
 
     client_config.resumption = rustls::client::Resumption::disabled();
     client_config.max_fragment_size = Some(args.max_fragment_length);
-    client_config.kemtls_enabled = true;
+    //client_config.kemtls_enabled = true;
 
     if let Some(cid_val) = args.cid {
         client_config.set_cid(&[cid_val]);
