@@ -82,18 +82,6 @@ fn parse_value<T: std::str::FromStr>(
     value.parse::<T>().map_err(|_| format!("invalid value for {flag}: {value}"))
 }
 
-fn take_attached_or_next<T: std::str::FromStr>(
-    attached: Option<&str>,
-    iter: &mut std::iter::Peekable<impl Iterator<Item = String>>,
-    flag: &str,
-) -> Result<T, String> {
-    if let Some(v) = attached {
-        v.parse::<T>().map_err(|_| format!("invalid value for {flag}: {v}"))
-    } else {
-        parse_value(iter, flag)
-    }
-}
-
 fn parse_args() -> Result<Args, String> {
     let mut args = Args::default();
     let mut iter = std::env::args().skip(1).peekable();
@@ -153,6 +141,7 @@ enum ClientState {
     Connected {
         conn: ServerConnection,
         response_sent: bool,
+        received_app_data: usize,
         last_seen: Instant,
     },
 }
@@ -194,6 +183,7 @@ impl ClientState {
                         *self = ClientState::Connected {
                             conn,
                             response_sent: false,
+                            received_app_data: 0,
                             last_seen: Instant::now(),
                         };
                     }
@@ -206,7 +196,7 @@ impl ClientState {
                     }
                 }
             }
-            ClientState::Connected { conn, response_sent, last_seen } => {
+            ClientState::Connected { conn, response_sent, received_app_data, last_seen } => {
                 *last_seen = Instant::now();
                 let mut slice = packet;
                 if let Err(e) = conn.read_tls(&mut slice) {
@@ -223,9 +213,11 @@ impl ClientState {
                 if io_state.plaintext_bytes_to_read() > 0 {
                     let mut reader = conn.reader();
                     let mut buf = vec![0u8; io_state.plaintext_bytes_to_read()];
-                    reader.read_exact(&mut buf).ok();
+                    if reader.read_exact(&mut buf).is_ok() {
+                        *received_app_data += buf.len();
+                    }
 
-                    if !*response_sent {
+                    if !*response_sent && *received_app_data >= payload_size {
                         send_zero_payload(conn, payload_size)?;
                         *response_sent = true;
                     }
@@ -233,7 +225,7 @@ impl ClientState {
 
                 Self::flush_output(conn, socket, addr)?;
 
-                if *response_sent && !conn.wants_write() {
+                if *response_sent && *received_app_data >= payload_size && !conn.wants_write() {
                     return Ok(true); 
                 }
             }

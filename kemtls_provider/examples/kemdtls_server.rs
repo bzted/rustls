@@ -302,6 +302,7 @@ enum ClientState {
     Connected {
         conn: ServerConnection,
         response_sent: bool,
+        received_app_data: usize,
         last_seen: Instant,
     },
 }
@@ -342,6 +343,7 @@ impl ClientState {
                         *self = ClientState::Connected {
                             conn,
                             response_sent: false,
+                            received_app_data: 0,
                             last_seen: Instant::now(),
                         };
                     }
@@ -355,7 +357,7 @@ impl ClientState {
                     }
                 }
             }
-            ClientState::Connected { conn, response_sent, last_seen } => {
+            ClientState::Connected { conn, response_sent, received_app_data, last_seen } => {
                 *last_seen = Instant::now();
                 let mut slice = packet;
                 if let Err(e) = conn.read_tls(&mut slice) {
@@ -373,9 +375,11 @@ impl ClientState {
                 if io_state.plaintext_bytes_to_read() > 0 {
                     let mut reader = conn.reader();
                     let mut discard = vec![0u8; io_state.plaintext_bytes_to_read()];
-                    reader.read_exact(&mut discard).ok();
+                    if reader.read_exact(&mut discard).is_ok() {
+                        *received_app_data += discard.len();
+                    }
 
-                    if !*response_sent {
+                    if !*response_sent && *received_app_data >= payload_size {
                         send_zero_payload(conn, payload_size)?;
                         *response_sent = true;
                     }
@@ -383,7 +387,7 @@ impl ClientState {
 
                 Self::write_pending(conn, socket, addr)?;
 
-                if *response_sent && !conn.wants_write() {
+                if *response_sent && *received_app_data >= payload_size && !conn.wants_write() {
                     return Ok(true); 
                 }
             }
