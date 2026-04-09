@@ -173,7 +173,7 @@ fn create_server_config(
     let mut server_config = match client_auth {
         true => ServerConfig::builder_with_provider(crypto_provider.into())
             .with_safe_default_protocol_versions()?
-            .enable_kemtls()
+            //.enable_kemtls()
             .with_client_cert_verifier(client_verifier)
             .with_cert_resolver(resolver),
         false => ServerConfig::builder_with_provider(crypto_provider.into()).with_safe_default_protocol_versions()?.with_no_client_auth().with_cert_resolver(resolver)
