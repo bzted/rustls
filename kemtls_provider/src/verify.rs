@@ -85,6 +85,11 @@ impl ServerCertVerifier for ClientVerifier {
         true
     }
 
+    fn authkem(&self) -> bool {
+        debug!("Trying authkem flow");
+        true
+    }
+
     fn encapsulate(&self, server_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
         debug!("About to encapsulate to servers public key");
 
@@ -208,6 +213,10 @@ impl ClientCertVerifier for ServerVerifier {
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         debug!("supported_verify_schemes called");
         vec![rustls::SignatureScheme::ED25519]
+    }
+
+    fn authkem(&self) -> bool {
+        true
     }
 
     fn encapsulate(&self, client_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
