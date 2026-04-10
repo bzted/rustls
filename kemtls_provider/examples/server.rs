@@ -297,10 +297,16 @@ fn run_dtls_server(server_config: ServerConfig, addr: String, port: u16, payload
                 }
             });
 
-            // handle_datagram ya no devuelve un flag de finalización
-            if let Err(e) = state.handle_datagram(packet, &socket, addr, server_config.clone(), payload_size) {
-                debug!("Error en sesión {}: {:?}", addr, e);
-                clients.remove(&addr);
+            match state.handle_datagram(packet, &socket, addr, server_config.clone(), payload_size) {
+                Ok(true) => {
+                    println!("Cerrando y eliminando cliente: {}", addr);
+                    clients.remove(&addr);
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    debug!("Error en sesión {}: {:?}", addr, e);
+                    clients.remove(&addr);
+                }
             }
         }
 
