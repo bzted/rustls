@@ -8,6 +8,7 @@ use subtle::ConstantTimeEq;
 
 use super::hs::{self, HandshakeHashOrBuffer, ServerContext};
 use super::server_conn::ServerConnectionData;
+use crate::NamedGroup;
 use crate::check::{inappropriate_handshake_message, inappropriate_message};
 use crate::common_state::{
     CommonState, HandshakeFlightTls13, HandshakeKind, Protocol, Side, State,
@@ -18,13 +19,13 @@ use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion
 use crate::error::{Error, InvalidMessage, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
 use crate::log::{debug, trace, warn};
-use crate::msgs::base::{Payload, PayloadU16, PayloadU8};
+use crate::msgs::base::{Payload, PayloadU8, PayloadU16};
 use crate::msgs::codec::{Codec, Reader};
 use crate::msgs::enums::KeyUpdateRequest;
 use crate::msgs::handshake::{
-    CertificateChain, CertificatePayloadTls13, HandshakeMessagePayload, HandshakePayload,
-    KemEncapsulationPayload, NewSessionTicketExtension, NewSessionTicketPayloadTls13,
-    CERTIFICATE_MAX_SIZE_LIMIT,
+    CERTIFICATE_MAX_SIZE_LIMIT, CertificateChain, CertificatePayloadTls13, HandshakeMessagePayload,
+    HandshakePayload, KemEncapsulationPayload, NewSessionTicketExtension,
+    NewSessionTicketPayloadTls13,
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist;
@@ -36,7 +37,7 @@ use crate::tls13::key_schedule::{
     KeyScheduleTraffic, KeyScheduleTrafficWithClientFinishedPending, ResumptionSecret,
 };
 use crate::tls13::{
-    construct_client_verify_message, construct_server_verify_message, Tls13CipherSuite,
+    Tls13CipherSuite, construct_client_verify_message, construct_server_verify_message,
 };
 use crate::{compress, rand, verify};
 
@@ -52,14 +53,14 @@ mod client_hello {
     use crate::msgs::handshake::{
         CertReqExtension, CertificatePayloadTls13, CertificateRequestPayloadTls13,
         ClientHelloPayload, HelloRetryExtension, HelloRetryRequest, KeyShareEntry, Random,
-        ServerExtension, ServerHelloPayload, SessionId, StoredAuthKey,
+        ServerExtension, ServerHelloPayload, SessionId,
     };
     use crate::server::common::ActiveCertifiedKey;
+    use crate::sign;
     use crate::tls13::key_schedule::{
         KeyScheduleEarly, KeyScheduleHandshake, KeySchedulePreHandshake,
     };
     use crate::verify::DigitallySignedStruct;
-    use crate::{client, sign};
 
     #[derive(PartialEq)]
     pub(super) enum EarlyDataDecision {
@@ -143,6 +144,7 @@ mod client_hello {
             chm: &Message<'_>,
             client_hello: &ClientHelloPayload,
             selected_kxg: &'static dyn SupportedKxGroup,
+            selected_kemtls_group: Option<NamedGroup>,
             mut sigschemes_ext: Vec<SignatureScheme>,
         ) -> hs::NextStateOrError<'static> {
             if client_hello.compression_methods.len() != 1 {
@@ -391,6 +393,7 @@ mod client_hello {
                 resumedata.as_ref(),
                 self.extra_exts,
                 authkem_psk_ss.clone(),
+                selected_kemtls_group,
                 &self.config,
             )?;
 
@@ -446,10 +449,10 @@ mod client_hello {
                 }
             }
 
-            match (server_kem_key, authkem_psk_ss.is_some()) {
-                (Some(server_kem_key), false) => {
+            if let Some(selected_group) = selected_kemtls_group {
+                if let (Some(server_kem_key), false) = (server_kem_key, authkem_psk_ss.is_some()) {
                     flight.finish(cx.common);
-                    Ok(Box::new(ExpectKemtlsEncapsulation {
+                    return Ok(Box::new(ExpectKemtlsEncapsulation {
                         config: Arc::clone(&self.config),
                         transcript: self.transcript,
                         key_schedule,
@@ -457,80 +460,78 @@ mod client_hello {
                         suite: self.suite,
                         client_auth: doing_client_auth,
                         server_key: server_kem_key,
+                        selected_kemtls_group: selected_group,
+                        send_tickets: self.send_tickets,
+                    }));
+                }
+            }
+
+            if doing_early_auth {
+                flight.finish(cx.common);
+                return Ok(Box::new(ExpectEarlyAuthCertificate {
+                    config: self.config,
+                    transcript: self.transcript,
+                    randoms: self.randoms,
+                    suite: self.suite,
+                    key_schedule,
+                    send_tickets: self.send_tickets,
+                }));
+            }
+
+            cx.common.check_aligned_handshake()?;
+            let key_schedule_traffic =
+                emit_finished_tls13(flight, &self.randoms, cx, key_schedule, &self.config);
+
+            if !doing_client_auth && self.config.send_half_rtt_data {
+                // Application data can be sent immediately after Finished, in one
+                // flight.  However, if client auth is enabled, we don't want to send
+                // application data to an unauthenticated peer.
+                cx.common
+                    .start_outgoing_traffic(&mut cx.sendable_plaintext);
+            }
+
+            if doing_client_auth {
+                if self
+                    .config
+                    .cert_decompressors
+                    .is_empty()
+                {
+                    Ok(Box::new(ExpectCertificate {
+                        config: self.config,
+                        transcript: self.transcript,
+                        suite: self.suite,
+                        key_schedule: key_schedule_traffic,
+                        send_tickets: self.send_tickets,
+                        message_already_in_transcript: false,
+                    }))
+                } else {
+                    Ok(Box::new(ExpectCertificateOrCompressedCertificate {
+                        config: self.config,
+                        transcript: self.transcript,
+                        suite: self.suite,
+                        key_schedule: key_schedule_traffic,
                         send_tickets: self.send_tickets,
                     }))
                 }
-                _ => {
-                    if doing_early_auth {
-                        flight.finish(cx.common);
-                        return Ok(Box::new(ExpectEarlyAuthCertificate {
-                            config: self.config,
-                            transcript: self.transcript,
-                            randoms: self.randoms,
-                            suite: self.suite,
-                            key_schedule,
-                            send_tickets: self.send_tickets,
-                        }));
-                    }
-
-                    cx.common.check_aligned_handshake()?;
-                    let key_schedule_traffic =
-                        emit_finished_tls13(flight, &self.randoms, cx, key_schedule, &self.config);
-
-                    if !doing_client_auth && self.config.send_half_rtt_data {
-                        // Application data can be sent immediately after Finished, in one
-                        // flight.  However, if client auth is enabled, we don't want to send
-                        // application data to an unauthenticated peer.
-                        cx.common
-                            .start_outgoing_traffic(&mut cx.sendable_plaintext);
-                    }
-
-                    if doing_client_auth {
-                        if self
-                            .config
-                            .cert_decompressors
-                            .is_empty()
-                        {
-                            Ok(Box::new(ExpectCertificate {
-                                config: self.config,
-                                transcript: self.transcript,
-                                suite: self.suite,
-                                key_schedule: key_schedule_traffic,
-                                send_tickets: self.send_tickets,
-                                message_already_in_transcript: false,
-                            }))
-                        } else {
-                            Ok(Box::new(ExpectCertificateOrCompressedCertificate {
-                                config: self.config,
-                                transcript: self.transcript,
-                                suite: self.suite,
-                                key_schedule: key_schedule_traffic,
-                                send_tickets: self.send_tickets,
-                            }))
-                        }
-                    } else if doing_early_data == EarlyDataDecision::Accepted
-                        && !cx.common.is_quic()
-                    {
-                        // Not used for QUIC: RFC 9001 §8.3: Clients MUST NOT send the EndOfEarlyData
-                        // message. A server MUST treat receipt of a CRYPTO frame in a 0-RTT packet as a
-                        // connection error of type PROTOCOL_VIOLATION.
-                        Ok(Box::new(ExpectEarlyData {
-                            config: self.config,
-                            transcript: self.transcript,
-                            suite: self.suite,
-                            key_schedule: key_schedule_traffic,
-                            send_tickets: self.send_tickets,
-                        }))
-                    } else {
-                        Ok(Box::new(ExpectFinished {
-                            config: self.config,
-                            transcript: self.transcript,
-                            suite: self.suite,
-                            key_schedule: key_schedule_traffic,
-                            send_tickets: self.send_tickets,
-                        }))
-                    }
-                }
+            } else if doing_early_data == EarlyDataDecision::Accepted && !cx.common.is_quic() {
+                // Not used for QUIC: RFC 9001 §8.3: Clients MUST NOT send the EndOfEarlyData
+                // message. A server MUST treat receipt of a CRYPTO frame in a 0-RTT packet as a
+                // connection error of type PROTOCOL_VIOLATION.
+                Ok(Box::new(ExpectEarlyData {
+                    config: self.config,
+                    transcript: self.transcript,
+                    suite: self.suite,
+                    key_schedule: key_schedule_traffic,
+                    send_tickets: self.send_tickets,
+                }))
+            } else {
+                Ok(Box::new(ExpectFinished {
+                    config: self.config,
+                    transcript: self.transcript,
+                    suite: self.suite,
+                    key_schedule: key_schedule_traffic,
+                    send_tickets: self.send_tickets,
+                }))
             }
         }
     }
@@ -576,10 +577,14 @@ mod client_hello {
         }
 
         if let Some(cid) = cid {
-            cx.common.record_layer.set_write_cid(ConnectionId::from(cid));
+            cx.common
+                .record_layer
+                .set_write_cid(ConnectionId::from(cid));
             if let Some(cid) = config.cid.as_ref() {
                 extensions.push(ServerExtension::ConnectionId(ConnectionId::from(cid)));
-                cx.common.record_layer.set_read_cid(ConnectionId::from(cid));
+                cx.common
+                    .record_layer
+                    .set_read_cid(ConnectionId::from(cid));
             }
         }
 
@@ -684,12 +689,8 @@ mod client_hello {
         group: NamedGroup,
     ) {
         let legacy_version = match common.protocol {
-            Protocol::Tcp | Protocol::Quic => {
-                ProtocolVersion::TLSv1_2
-            }
-            Protocol::Udp => {
-                ProtocolVersion::DTLSv1_2
-            }
+            Protocol::Tcp | Protocol::Quic => ProtocolVersion::TLSv1_2,
+            Protocol::Udp => ProtocolVersion::DTLSv1_2,
         };
 
         let mut req = HelloRetryRequest {
@@ -705,15 +706,15 @@ mod client_hello {
         match common.protocol {
             Protocol::Tcp | Protocol::Quic => {
                 req.extensions
-            .push(HelloRetryExtension::SupportedVersions(
-                ProtocolVersion::TLSv1_3,
-            ));
+                    .push(HelloRetryExtension::SupportedVersions(
+                        ProtocolVersion::TLSv1_3,
+                    ));
             }
             Protocol::Udp => {
                 req.extensions
-            .push(HelloRetryExtension::SupportedVersions(
-                ProtocolVersion::DTLSv1_3,
-            ));
+                    .push(HelloRetryExtension::SupportedVersions(
+                        ProtocolVersion::DTLSv1_3,
+                    ));
             }
         };
 
@@ -806,15 +807,29 @@ mod client_hello {
         resumedata: Option<&persist::ServerSessionValue>,
         extra_exts: Vec<ServerExtension>,
         authkem_psk_ss: Option<Vec<u8>>,
+        selected_kemtls_group: Option<NamedGroup>,
         config: &ServerConfig,
     ) -> Result<EarlyDataDecision, Error> {
         let mut ep = hs::ExtensionProcessing::new();
-        ep.process_common(config, cx, ocsp_response, hello, resumedata, extra_exts)?;
+        ep.process_common(
+            config,
+            cx,
+            ocsp_response,
+            hello,
+            resumedata,
+            extra_exts,
+            selected_kemtls_group,
+        )?;
 
         let early_data =
             decide_if_early_data_allowed(cx, hello, resumedata, suite, authkem_psk_ss, config);
         if early_data == EarlyDataDecision::Accepted {
             ep.exts.push(ServerExtension::EarlyData);
+        }
+
+        if let Some(kemalg) = selected_kemtls_group {
+            ep.exts
+                .push(ServerExtension::Kemtls(vec![kemalg]));
         }
 
         let ee = HandshakeMessagePayload {
@@ -1281,6 +1296,7 @@ struct ExpectKemtlsEncapsulation {
     randoms: ConnectionRandoms,
     client_auth: bool,
     server_key: Arc<dyn KemKey>,
+    selected_kemtls_group: NamedGroup,
     send_tickets: usize,
 }
 impl State<ServerConnectionData> for ExpectKemtlsEncapsulation {
@@ -1321,6 +1337,7 @@ impl State<ServerConnectionData> for ExpectKemtlsEncapsulation {
                 suite: self.suite,
                 key_schedule: auth_handhsake_key_schedule,
                 randoms: self.randoms,
+                selected_kemtls_group: self.selected_kemtls_group,
                 send_tickets: self.send_tickets,
             }))
         } else {
@@ -1347,6 +1364,7 @@ struct ExpectKemtlsCertificate {
     suite: &'static Tls13CipherSuite,
     key_schedule: KeyScheduleAuthenticatedHandshake,
     randoms: ConnectionRandoms,
+    selected_kemtls_group: NamedGroup,
     send_tickets: usize,
 }
 
@@ -1381,9 +1399,7 @@ impl State<ServerConnectionData> for ExpectKemtlsCertificate {
                 return Err(Error::NoCertificatesPresented);
             }
             debug!("Server: client authentication not mandatory, proceeding without client auth");
-            let key_schedule = self
-                .key_schedule
-                .into_main_secret(None);
+            let key_schedule = self.key_schedule.into_main_secret(None);
 
             return Ok(Box::new(ExpectKemtlsFinished {
                 config: self.config,
@@ -1405,7 +1421,7 @@ impl State<ServerConnectionData> for ExpectKemtlsCertificate {
         let (ct, client_ss) = self
             .config
             .verifier
-            .encapsulate(&client_pk)?;
+            .encapsulate(Some(self.selected_kemtls_group), &client_pk)?;
 
         let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
 
@@ -1534,7 +1550,7 @@ impl State<ServerConnectionData> for ExpectKemtlsFinished {
             false => {
                 return Err(cx
                     .common
-                    .send_fatal_alert(AlertDescription::DecryptError, Error::DecryptError))
+                    .send_fatal_alert(AlertDescription::DecryptError, Error::DecryptError));
             }
         };
         self.transcript.add_message(&m);
@@ -1756,7 +1772,7 @@ impl State<ServerConnectionData> for ExpectEarlyAuthCertificate {
         let (ct, client_ss) = self
             .config
             .verifier
-            .encapsulate(&client_pk)?;
+            .encapsulate(None, &client_pk)?;
 
         let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
 

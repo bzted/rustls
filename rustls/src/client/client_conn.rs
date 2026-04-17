@@ -291,8 +291,10 @@ pub struct ClientConfig {
     pub early_auth: bool,
 
     /// Connection Id
-    //#[cfg(features = "dtls13")]   
     pub cid: Option<ConnectionId>,
+
+    /// KEMTLS groups
+    pub kemtls_groups: Vec<NamedGroup>,
 }
 
 impl ClientConfig {

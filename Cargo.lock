@@ -1770,6 +1770,7 @@ dependencies = [
  "rustls 0.23.23",
  "rustls-webpki",
  "x25519-dalek",
+ "x509-parser",
 ]
 
 [[package]]

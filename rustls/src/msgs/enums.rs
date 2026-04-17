@@ -123,6 +123,7 @@ enum_builder! {
         StoredAuthKey => 0x0034, // These are testing values, real values are to be decided
         EarlyAuth => 0x0035, // These are testing values, real values are to be decided
         ConnectionId => 0x36,
+        Kemtls => 0x37,
     }
 }
 

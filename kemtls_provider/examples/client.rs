@@ -12,6 +12,7 @@ use rustls::crypto::CryptoProvider;
 use std::cmp::Ordering;
 
 const BUFFER_SIZE: usize = 4096;
+const APP_FRAME_HEADER_LEN: usize = 4;
 const TIMEOUT_SECS: u64 = 1;
 
 // DTLS Helper Functions
@@ -235,17 +236,36 @@ fn send_http_request(
     conn: &mut ClientConnection,
     payload_size: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use std::fs::File;
-    use std::io::Read;
-
-    let mut file = std::fs::File::open("/dev/zero")?;
-    let mut buffer = vec![0u8; payload_size];
-    file.read_exact(&mut buffer)?;
-
+    let buffer = build_zero_payload_frame(payload_size);
     conn.writer().write_all(&buffer)?;
     send_dtls_datagram(socket, conn)?;
     debug!("HTTP request sent");
     Ok(())
+}
+
+fn build_zero_payload_frame(payload_size: usize) -> Vec<u8> {
+    let mut buffer = Vec::with_capacity(APP_FRAME_HEADER_LEN + payload_size);
+    buffer.extend_from_slice(&(payload_size as u32).to_be_bytes());
+    buffer.resize(APP_FRAME_HEADER_LEN + payload_size, 0);
+    buffer
+}
+
+fn try_extract_frame(buffer: &[u8]) -> Option<Vec<u8>> {
+    if buffer.len() < APP_FRAME_HEADER_LEN {
+        return None;
+    }
+
+    let payload_len = u32::from_be_bytes(
+        buffer[..APP_FRAME_HEADER_LEN]
+            .try_into()
+            .expect("frame header has fixed size"),
+    ) as usize;
+
+    if buffer.len() < APP_FRAME_HEADER_LEN + payload_len {
+        return None;
+    }
+
+    Some(buffer[APP_FRAME_HEADER_LEN..APP_FRAME_HEADER_LEN + payload_len].to_vec())
 }
 
 fn receive_http_response(
@@ -253,33 +273,26 @@ fn receive_http_response(
     conn: &mut ClientConnection,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut in_buf = [0u8; BUFFER_SIZE];
-    let mut plaintext = Vec::new();
+    let mut framed_plaintext = Vec::new();
     let mut tmp = [0u8; BUFFER_SIZE];
 
     loop {
-        {
+        loop {
             let mut reader = conn.reader();
             match reader.read(&mut tmp) {
-                Ok(0) => {}
-                Ok(n) => {
-                    plaintext.extend_from_slice(&tmp[..n]);
-                    if plaintext.len() > 0 && n < BUFFER_SIZE {
-                        break;
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Ok(0) => break,
+                Ok(n) => framed_plaintext.extend_from_slice(&tmp[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(e) => return Err(Box::new(e)),
             }
         }
 
-        if plaintext.is_empty() {
-            receive_dtls_datagram(socket, conn, &mut in_buf)?;
-        } else {
-            break;
+        if let Some(frame) = try_extract_frame(&framed_plaintext) {
+            return Ok(frame);
         }
-    }
 
-    Ok(plaintext)
+        receive_dtls_datagram(socket, conn, &mut in_buf)?;
+    }
 }
 
 fn run_dtls_client(
@@ -293,7 +306,6 @@ fn run_dtls_client(
 
     perform_dtls_handshake(&socket, &mut conn)?;
 
-    let request = b"Hello from DTLS client!\n";
     send_http_request(&socket, &mut conn, payload_size)?;
 
     println!("Waiting for response...");
@@ -414,7 +426,7 @@ fn main() {
 
         if let Some(cid_val) = args.cid {
             println!("Offering CID: {}", cid_val);
-            client_config.set_cid(&[cid_val]);
+            let _ = client_config.set_cid(&[cid_val]);
         }
         
         if args.iterations > 1 || args.csv.is_some() {

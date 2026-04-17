@@ -9,7 +9,7 @@ use crate::error::Error;
 use crate::sign::{CertifiedKey, SingleCertAndKey};
 use crate::sync::Arc;
 use crate::verify::{ClientCertVerifier, NoClientAuth};
-use crate::{NoKeyLog, compress, versions};
+use crate::{NamedGroup, NoKeyLog, compress, versions};
 
 impl ConfigBuilder<ServerConfig, WantsVerifier> {
     /// Choose how to verify client certificates.
@@ -21,6 +21,7 @@ impl ConfigBuilder<ServerConfig, WantsVerifier> {
             state: WantsServerCert {
                 versions: self.state.versions,
                 verifier: client_cert_verifier,
+                kemtls_groups: self.state.kemtls_groups,
             },
             provider: self.provider,
             time_provider: self.time_provider,
@@ -32,6 +33,12 @@ impl ConfigBuilder<ServerConfig, WantsVerifier> {
     pub fn with_no_client_auth(self) -> ConfigBuilder<ServerConfig, WantsServerCert> {
         self.with_client_cert_verifier(Arc::new(NoClientAuth))
     }
+
+    /// Enable KEMTLS support
+    pub fn with_kemtls_groups(mut self, groups: Vec<NamedGroup>) -> Self {
+        self.state.kemtls_groups = groups;
+        self
+    }
 }
 
 /// A config builder state where the caller must supply how to provide a server certificate to
@@ -42,6 +49,7 @@ impl ConfigBuilder<ServerConfig, WantsVerifier> {
 pub struct WantsServerCert {
     versions: versions::EnabledVersions,
     verifier: Arc<dyn ClientCertVerifier>,
+    kemtls_groups: Vec<NamedGroup>,
 }
 
 impl ConfigBuilder<ServerConfig, WantsServerCert> {
@@ -123,6 +131,7 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
             cert_compression_cache: Arc::new(compress::CompressionCache::default()),
             cert_decompressors: compress::default_cert_decompressors().to_vec(),
             cid: None,
+            kemtls_groups: self.state.kemtls_groups,
         }
     }
 }

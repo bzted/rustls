@@ -55,7 +55,7 @@ pub fn server_cert_resolver() -> Arc<dyn server::ResolvesServerCert> {
 struct DummyCert(Arc<sign::CertifiedKey>);
 
 impl server::ResolvesServerCert for DummyCert {
-    fn resolve(&self, _client_hello: server::ClientHello) -> Option<Arc<sign::CertifiedKey>> {
+    fn resolve(&self, _client_hello: server::ClientHello, _selected_kemtls_group: Option<NamedGroup>) -> Option<Arc<sign::CertifiedKey>> {
         Some(self.0.clone())
     }
 }

@@ -98,7 +98,7 @@ fn main() {
         }
     };
 
-    let server_verifier = Arc::new(ClientVerifier::new(kemalg, None, None));
+    let server_verifier = Arc::new(ClientVerifier::new(None, None));
 
     let kem = Kem::new(kemalg).expect("Failed to create kem instance");
 
