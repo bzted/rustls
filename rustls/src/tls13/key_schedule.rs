@@ -4,7 +4,7 @@ use std::vec::Vec;
 
 use alloc::boxed::Box;
 use alloc::string::ToString;
-use log::{debug, trace};
+use log::trace;
 
 use crate::common_state::{CommonState, Side};
 use crate::crypto::cipher::{AeadKey, Iv, MessageDecrypter, Tls13AeadAlgorithm};

@@ -10,7 +10,7 @@ use crate::msgs::handshake::ALL_KEY_EXCHANGE_ALGORITHMS;
 use crate::sync::Arc;
 use crate::time_provider::TimeProvider;
 use crate::verify::AuthKemPskKey;
-use crate::versions;
+use crate::{NamedGroup, versions};
 #[cfg(doc)]
 use crate::{ClientConfig, ServerConfig};
 
@@ -259,6 +259,7 @@ impl<S: ConfigSide> ConfigBuilder<S, WantsVersions> {
                 versions: versions::EnabledVersions::new(versions),
                 client_ech_mode: None,
                 authkem_psk_key: None,
+                kemtls_groups: Vec::new(),
             },
             provider: self.provider,
             time_provider: self.time_provider,
@@ -275,6 +276,7 @@ pub struct WantsVerifier {
     pub(crate) versions: versions::EnabledVersions,
     pub(crate) client_ech_mode: Option<EchMode>,
     pub(crate) authkem_psk_key: Option<Arc<dyn AuthKemPskKey>>,
+    pub(crate) kemtls_groups: Vec<NamedGroup>,
 }
 
 /// Helper trait to abstract [`ConfigBuilder`] over building a [`ClientConfig`] or [`ServerConfig`].

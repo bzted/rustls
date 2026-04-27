@@ -36,7 +36,7 @@ use crate::time_provider::TimeProvider;
 use crate::vecbuf::ChunkVecBuffer;
 #[cfg(feature = "std")]
 use crate::WantsVerifier;
-use crate::{compress, sign, verify, versions, DistinguishedName, KeyLog, WantsVersions};
+use crate::{DistinguishedName, KeyLog, NamedGroup, WantsVersions, compress, sign, verify, versions};
 
 /// A trait for the ability to store server session data.
 ///
@@ -127,7 +127,7 @@ pub trait ResolvesServerCert: Debug + Send + Sync {
     /// ClientHello information.
     ///
     /// Return `None` to abort the handshake.
-    fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<sign::CertifiedKey>>;
+    fn resolve(&self, client_hello: ClientHello<'_>, selected_kemtls_group: Option<NamedGroup>) -> Option<Arc<sign::CertifiedKey>>;
 
     /// Return true when the server only supports raw public keys.
     fn only_raw_public_keys(&self) -> bool {
@@ -428,6 +428,9 @@ pub struct ServerConfig {
 
     /// ConnectionId
     pub cid: Option<ConnectionId>,
+
+    /// KEMTLS groups
+    pub kemtls_groups: Vec<NamedGroup>,
 }
 
 impl ServerConfig {
@@ -858,8 +861,8 @@ mod connection {
             };
 
             let mut cx = Context::from(&mut connection);
-            let sig_schemes = match hs::process_client_hello(&message, false, &mut cx) {
-                Ok((_, sig_schemes)) => sig_schemes,
+            let (sig_schemes, kemtls_groups) = match hs::process_client_hello(&message, false, &mut cx) {
+                Ok((_, sig_schemes, kemtls_groups)) => (sig_schemes, kemtls_groups),
                 Err(err) => {
                     return Err((err, AcceptedAlert::from(connection)));
                 }
@@ -869,6 +872,7 @@ mod connection {
                 connection,
                 message,
                 sig_schemes,
+                kemtls_groups,
             }))
         }
     }
@@ -973,6 +977,7 @@ pub struct Accepted {
     connection: ConnectionCommon<ServerConnectionData>,
     message: Message<'static>,
     sig_schemes: Vec<SignatureScheme>,
+    kemtls_groups: Option<Vec<NamedGroup>>,
 }
 
 impl Accepted {
@@ -1027,7 +1032,7 @@ impl Accepted {
         let mut cx = hs::ServerContext::from(&mut self.connection);
 
         let ch = Self::client_hello_payload(&self.message);
-        let new = match state.with_certified_key(self.sig_schemes, ch, &self.message, &mut cx) {
+        let new = match state.with_certified_key(self.sig_schemes, self.kemtls_groups, ch, &self.message, &mut cx) {
             Ok(new) => new,
             Err(err) => return Err((err, AcceptedAlert::from(self.connection))),
         };

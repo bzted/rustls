@@ -23,8 +23,7 @@ use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use rustls::version::{TLS12, TLS13};
 use rustls::{
-    AlertDescription, CertificateError, DigitallySignedStruct, DistinguishedName, Error,
-    InvalidMessage, RootCertStore,
+    AlertDescription, CertificateError, DigitallySignedStruct, DistinguishedName, Error, InvalidMessage, NamedGroup, RootCertStore
 };
 
 use x509_parser::prelude::FromDer;
@@ -314,7 +313,7 @@ fn client_can_request_certain_trusted_cas() {
 pub struct ResolvesCertChainByCaName(Vec<(DistinguishedName, Arc<CertifiedKey>)>);
 
 impl ResolvesServerCert for ResolvesCertChainByCaName {
-    fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+    fn resolve(&self, client_hello: ClientHello<'_>, _selected_kemtls_group: Option<NamedGroup>) -> Option<Arc<CertifiedKey>> {
         let Some(cas_extension) = client_hello.certificate_authorities() else {
             println!(
                 "ResolvesCertChainByCaName: no CAs extension in ClientHello, returning default cert"

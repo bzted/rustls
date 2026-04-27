@@ -10,7 +10,6 @@ use super::tls12;
 use crate::common_state::{KxState, Protocol, State};
 use crate::conn::ConnectionRandoms;
 use crate::crypto::SupportedKxGroup;
-use crate::dtls13::record_layer::DtlsRecordLayer;
 use crate::enums::{
     AlertDescription, CipherSuite, HandshakeType, ProtocolVersion, SignatureAlgorithm,
     SignatureScheme,
@@ -19,7 +18,7 @@ use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::log::{debug, trace};
 #[cfg(feature = "dtls13")]
-use crate::msgs::base::{PayloadU16, PayloadU8};
+use crate::msgs::base::PayloadU8;
 use crate::msgs::enums::{CertificateType, Compression, ExtensionType, NamedGroup};
 #[cfg(feature = "tls12")]
 use crate::msgs::handshake::SessionId;
@@ -30,9 +29,9 @@ use crate::msgs::handshake::{
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist;
 use crate::server::common::ActiveCertifiedKey;
-use crate::server::{tls13, ClientHello, ServerConfig};
+use crate::server::{ClientHello, ServerConfig, tls13};
 use crate::sync::Arc;
-use crate::{client, suites, SupportedCipherSuite};
+use crate::{SupportedCipherSuite, suites};
 
 pub(super) type NextState<'a> = Box<dyn State<ServerConnectionData> + 'a>;
 pub(super) type NextStateOrError<'a> = Result<NextState<'a>, Error>;
@@ -77,6 +76,7 @@ impl ExtensionProcessing {
         hello: &ClientHelloPayload,
         resumedata: Option<&persist::ServerSessionValue>,
         extra_exts: Vec<ServerExtension>,
+        selected_kemtls_group: Option<NamedGroup>,
     ) -> Result<(), Error> {
         // ALPN
         let our_protocols = &config.alpn_protocols;
@@ -159,8 +159,8 @@ impl ExtensionProcessing {
             ocsp_response.take();
         }
 
-        self.validate_server_cert_type_extension(hello, config, cx)?;
-        self.validate_client_cert_type_extension(hello, config, cx)?;
+        self.validate_server_cert_type_extension(hello, config, cx, selected_kemtls_group)?;
+        self.validate_client_cert_type_extension(hello, config, cx, selected_kemtls_group)?;
 
         self.exts.extend(extra_exts);
 
@@ -213,6 +213,7 @@ impl ExtensionProcessing {
         hello: &ClientHelloPayload,
         config: &ServerConfig,
         cx: &mut ServerContext<'_>,
+        selected_kemtls_group: Option<NamedGroup>,
     ) -> Result<(), Error> {
         let client_supports = hello
             .server_certificate_extension()
@@ -221,9 +222,10 @@ impl ExtensionProcessing {
 
         self.process_cert_type_extension(
             client_supports,
-            config
-                .cert_resolver
-                .only_raw_public_keys(),
+            selected_kemtls_group.is_some()
+                || config
+                    .cert_resolver
+                    .only_raw_public_keys(),
             ExtensionType::ServerCertificateType,
             cx,
         )
@@ -234,7 +236,12 @@ impl ExtensionProcessing {
         hello: &ClientHelloPayload,
         config: &ServerConfig,
         cx: &mut ServerContext<'_>,
+        selected_kemtls_group: Option<NamedGroup>,
     ) -> Result<(), Error> {
+        if !config.verifier.offer_client_auth() {
+            return Ok(());
+        }
+
         let client_supports = hello
             .client_certificate_extension()
             .map(|certificate_types| certificate_types.to_vec())
@@ -242,9 +249,10 @@ impl ExtensionProcessing {
 
         self.process_cert_type_extension(
             client_supports,
-            config
-                .verifier
-                .requires_raw_public_keys(),
+            selected_kemtls_group.is_some()
+                || config
+                    .verifier
+                    .requires_raw_public_keys(),
             ExtensionType::ClientCertificateType,
             cx,
         )
@@ -334,6 +342,7 @@ impl ExpectClientHello {
     pub(super) fn with_certified_key(
         self,
         mut sig_schemes: Vec<SignatureScheme>,
+        offered_kemtls_groups: Option<Vec<NamedGroup>>,
         client_hello: &ClientHelloPayload,
         m: &Message<'_>,
         cx: &mut ServerContext<'_>,
@@ -423,6 +432,18 @@ impl ExpectClientHello {
         sig_schemes
             .retain(|scheme| suites::compatible_sigscheme_for_suites(*scheme, &client_suites));
 
+        let selected_kemtls_group = offered_kemtls_groups
+            .and_then(|mut groups| {
+                groups.retain(|group| {
+                    self.config
+                        .kemtls_groups
+                        .contains(group)
+                });
+                (!groups.is_empty()).then_some(groups)
+            })
+            .as_ref()
+            .and_then(|groups| groups.first().copied());
+
         // We adhere to the TLS 1.2 RFC by not exposing this to the cert resolver if TLS version is 1.2
         let certificate_authorities = match version {
             ProtocolVersion::TLSv1_2 => None,
@@ -444,7 +465,7 @@ impl ExpectClientHello {
             let certkey = self
                 .config
                 .cert_resolver
-                .resolve(client_hello);
+                .resolve(client_hello, selected_kemtls_group);
 
             certkey.ok_or_else(|| {
                 cx.common.send_fatal_alert(
@@ -506,7 +527,15 @@ impl ExpectClientHello {
                 send_tickets: self.send_tickets,
                 extra_exts: self.extra_exts,
             }
-            .handle_client_hello(cx, certkey, m, client_hello, skxg, sig_schemes),
+            .handle_client_hello(
+                cx,
+                certkey,
+                m,
+                client_hello,
+                skxg,
+                selected_kemtls_group,
+                sig_schemes,
+            ),
             #[cfg(feature = "tls12")]
             SupportedCipherSuite::Tls12(suite) => tls12::CompleteClientHelloHandling {
                 config: self.config,
@@ -668,8 +697,9 @@ impl State<ServerConnectionData> for ExpectClientHello {
     where
         Self: 'm,
     {
-        let (client_hello, sig_schemes) = process_client_hello(&m, self.done_retry, cx)?;
-        self.with_certified_key(sig_schemes, client_hello, &m, cx)
+        let (client_hello, sig_schemes, kemtls_groups) =
+            process_client_hello(&m, self.done_retry, cx)?;
+        self.with_certified_key(sig_schemes, kemtls_groups, client_hello, &m, cx)
     }
 
     fn into_owned(self: Box<Self>) -> NextState<'static> {
@@ -690,7 +720,14 @@ pub(super) fn process_client_hello<'m>(
     m: &'m Message<'m>,
     done_retry: bool,
     cx: &mut ServerContext<'_>,
-) -> Result<(&'m ClientHelloPayload, Vec<SignatureScheme>), Error> {
+) -> Result<
+    (
+        &'m ClientHelloPayload,
+        Vec<SignatureScheme>,
+        Option<Vec<NamedGroup>>,
+    ),
+    Error,
+> {
     let client_hello =
         require_handshake_msg!(m, HandshakeType::ClientHello, HandshakePayload::ClientHello)?;
 
@@ -758,7 +795,13 @@ pub(super) fn process_client_hello<'m>(
             )
         })?;
 
-    Ok((client_hello, sig_schemes.to_owned()))
+    let kemtls_groups = client_hello.kemtls_extension();
+
+    Ok((
+        client_hello,
+        sig_schemes.to_owned(),
+        kemtls_groups.map(|groups| groups.to_owned()),
+    ))
 }
 
 pub(crate) enum HandshakeHashOrBuffer {

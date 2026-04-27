@@ -45,8 +45,8 @@ mod client_hello {
         ClientSessionTicket, Random, ServerExtension, ServerHelloPayload, ServerKeyExchange,
         ServerKeyExchangeParams, ServerKeyExchangePayload,
     };
-    use crate::sign;
     use crate::verify::DigitallySignedStruct;
+    use crate::{NamedGroup, sign};
 
     pub(in crate::server) struct CompleteClientHelloHandling {
         pub(in crate::server) config: Arc<ServerConfig>,
@@ -343,7 +343,15 @@ mod client_hello {
         extra_exts: Vec<ServerExtension>,
     ) -> Result<bool, Error> {
         let mut ep = hs::ExtensionProcessing::new();
-        ep.process_common(config, cx, ocsp_response, hello, resumedata, extra_exts)?;
+        ep.process_common(
+            config,
+            cx,
+            ocsp_response,
+            hello,
+            resumedata,
+            extra_exts,
+            None,
+        )?;
         ep.process_tls12(config, hello, using_ems);
 
         let sh = HandshakeMessagePayload {

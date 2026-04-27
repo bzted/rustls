@@ -13,7 +13,7 @@ use crate::sync::Arc;
 use crate::verify::AuthKemPskKey;
 use crate::versions::TLS13;
 use crate::webpki::{self, WebPkiServerVerifier};
-use crate::{compress, verify, versions, WantsVersions};
+use crate::{NamedGroup, WantsVersions, compress, verify, versions};
 
 impl ConfigBuilder<ClientConfig, WantsVersions> {
     /// Enable Encrypted Client Hello (ECH) in the given mode.
@@ -75,6 +75,7 @@ impl ConfigBuilder<ClientConfig, WantsVerifier> {
                 verifier,
                 client_ech_mode: self.state.client_ech_mode,
                 authkem_psk_key: self.state.authkem_psk_key,
+                kemtls_groups: self.state.kemtls_groups,
             },
             provider: self.provider,
             time_provider: self.time_provider,
@@ -91,6 +92,12 @@ impl ConfigBuilder<ClientConfig, WantsVerifier> {
     /// Pass a psk key in the clients configuration
     pub fn with_custom_authkem_psk_key(mut self, psk: Arc<dyn AuthKemPskKey>) -> Self {
         self.state.authkem_psk_key = Some(psk);
+        self
+    }
+
+    /// Enable KEMTLS support
+    pub fn with_kemtls_groups(mut self, groups: Vec<NamedGroup>) -> Self {
+        self.state.kemtls_groups = groups;
         self
     }
 }
@@ -122,6 +129,7 @@ pub(super) mod danger {
                     verifier,
                     client_ech_mode: self.cfg.state.client_ech_mode,
                     authkem_psk_key: self.cfg.state.authkem_psk_key,
+                    kemtls_groups: self.cfg.state.kemtls_groups,
                 },
                 provider: self.cfg.provider,
                 time_provider: self.cfg.time_provider,
@@ -141,6 +149,7 @@ pub struct WantsClientCert {
     verifier: Arc<dyn verify::ServerCertVerifier>,
     client_ech_mode: Option<EchMode>,
     authkem_psk_key: Option<Arc<dyn AuthKemPskKey>>,
+    kemtls_groups: Vec<NamedGroup>,
 }
 
 impl ConfigBuilder<ClientConfig, WantsClientCert> {
@@ -194,6 +203,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             authkem_psk_key: self.state.authkem_psk_key,
             early_auth: false, 
             cid: None,
+            kemtls_groups: self.state.kemtls_groups,
         }
     }
 }

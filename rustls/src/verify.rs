@@ -8,6 +8,7 @@ use crate::error::{Error, InvalidMessage};
 use crate::msgs::base::PayloadU16;
 use crate::msgs::codec::{Codec, Reader};
 use crate::msgs::handshake::DistinguishedName;
+use crate::NamedGroup;
 
 // Marker types.  These are used to bind the fact some verification
 // (certificate chain or handshake signature) has taken place into
@@ -159,14 +160,13 @@ pub trait ServerCertVerifier: Debug + Send + Sync {
         None
     }
 
-    /// Returns if we are using authkem flow
-    fn authkem(&self) -> bool {
-        false
-    }
-
     /// Encapsulates to the servers public key
     /// Method only useful if we are using the authkem flow
-    fn encapsulate(&self, server_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    fn encapsulate(
+        &self,
+        _selected_group: Option<NamedGroup>,
+        _server_pk: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>), Error> {
         // Empty by default
         Ok((Vec::new(), Vec::new()))
     }
@@ -290,14 +290,13 @@ pub trait ClientCertVerifier: Debug + Send + Sync {
         false
     }
 
-    /// Returns if we are using authkem flow
-    fn authkem(&self) -> bool {
-        false
-    }
-
     /// Encapsulates to the clients public key
     /// Method only useful if we are using the authkem flow
-    fn encapsulate(&self, client_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    fn encapsulate(
+        &self,
+        _selected_group: Option<NamedGroup>,
+        _client_pk: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>), Error> {
         // Empty by default
         Ok((Vec::new(), Vec::new()))
     }

@@ -478,8 +478,8 @@ struct FixedSignatureSchemeServerCertResolver {
 }
 
 impl server::ResolvesServerCert for FixedSignatureSchemeServerCertResolver {
-    fn resolve(&self, client_hello: ClientHello) -> Option<Arc<sign::CertifiedKey>> {
-        let mut certkey = self.resolver.resolve(client_hello)?;
+    fn resolve(&self, client_hello: ClientHello, selected_kemtls_group: Option<NamedGroup>) -> Option<Arc<sign::CertifiedKey>> {
+        let mut certkey = self.resolver.resolve(client_hello, selected_kemtls_group)?;
         Arc::make_mut(&mut certkey).key = Arc::new(FixedSignatureSchemeSigningKey {
             key: certkey.key.clone(),
             scheme: self.scheme,

@@ -1,75 +1,86 @@
-use kemtls_provider::resolver::{KeyPair, ServerCertResolver};
+use kemtls_provider::resolver::{
+    ServerCertResolver, default_keys_dir, load_x25519_keypair_from_pem, supported_kemtls_groups,
+};
 use kemtls_provider::sign::DummySigningKey;
 use kemtls_provider::verify::ServerVerifier;
-use kemtls_provider::{PureKemKey, get_pq_kx_group_by_name, provider, HybridKemKey};
+use kemtls_provider::{DEFAULT_KX_GROUPS, KX_GROUPS, get_kx_group_by_name, get_pq_kx_group_by_name, provider};
 use log::debug;
-use oqs::kem::Kem;
-use rustls::crypto::CryptoProvider;
-use rustls::server::Acceptor;
-use rustls::{Error, ServerConfig, ServerConnection};
+use rustls::crypto::{CryptoProvider, SupportedKxGroup};
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
+use rustls::server::{Acceptor, WebPkiClientVerifier};
+use rustls::{RootCertStore, ServerConfig, ServerConnection};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::collections::HashMap;
-use rustls::sign::KemKey;
-use openssl::pkey::{Id, PKey};
-use std::fs;
 
 const BUFFER_SIZE: usize = 4096;
+const APP_FRAME_HEADER_LEN: usize = 4;
 const TIMEOUT_SECS: u64 = 1;
 const HTTP_RESPONSE: &[u8] = b"Hello from TLS Server!";
 
-
 #[derive(Debug, Clone)]
 struct ServerArgs {
-    authkem: String,
+    authkems: Vec<String>,
     group: Option<String>,
+    keys_dir: Option<String>,
+    pqc_provider: bool,
     cid: Option<u8>,
     max_fragment_length: usize,
     client_auth: bool,
+    cert_file: String,
+    pk_file: String,
+    ca_file: String,
     port: u16,
     addr: String,
     payload_size: usize,
-    hybrid: bool,
-    x25519_key: Option<String>,
+    hybrid_key: Option<String>,
 }
 
 impl Default for ServerArgs {
     fn default() -> Self {
         Self {
-            authkem: "MLKEM768".to_string(),
+            authkems: Vec::new(),
             group: None,
+            keys_dir: None,
+            pqc_provider: false,
             cid: None,
             max_fragment_length: 1300,
             client_auth: true,
+            cert_file: "../test-ca/rsa-2048/end.fullchain".to_string(),
+            pk_file: "../test-ca/rsa-2048/end.key".to_string(),
+            ca_file: "../test-ca/rsa-2048/ca.cert".to_string(),
             port: 8443,
             addr: "127.0.0.1".to_string(),
             payload_size: 1000,
-            hybrid: false,
-            x25519_key: None,
+            hybrid_key: None,
         }
     }
 }
 
 fn print_help_and_exit() -> ! {
-    println!(
-        concat!(
-            "KEMTLS Server with TLS 1.3 and DTLS 1.3 support\n\n",
-            "Options:\n",
-            "  -a, --authkem <ALG>             Authentication KEM (default: MLKEM768)\n",
-            "  -g, --group <NAME>              KX group to offer\n",
-            "  -c, --cid <0-255>               Optional DTLS CID\n",
-            "  -L, --max-fragment-length <N>   Max fragment length (default: 1300)\n",
-            "  -d, --disable-client-auth       Disable client authentication\n",
-            "  -p, --port <PORT>               Port (default: 8443)\n",
-            "      --addr <ADDR>               Bind address (default: 127.0.0.1)\n",
-            "  -B, --payload-size <N>          Payload bytes after handshake (default: 1000)\n",
-            "      --hybrid                    Enable hybrid KEMs\n",
-            "  -k, --x25519-key <FILE>         X25519 private key PEM\n",
-            "  -h, --help                      Show help\n",
-        )
-    );
+    println!(concat!(
+        "KEMTLS Server with TLS 1.3 and DTLS 1.3 support\n\n",
+        "Options:\n",
+        "  -a, --authkem <ALG>[,<ALG>...]  Authentication KEM(s); repeatable, defaults to all\n",
+        "  -g, --group <NAME>              KX group to offer\n",
+        "      --keys-dir <DIR>            Directory containing KEMTLS keys [default: CARGO_MANIFEST_DIR/keys]\n",
+        "  -q, --pqc-provider              Interpret -g as a PQ/PQ-hybrid KX group\n",
+        "      --cid <0-255>               Optional DTLS CID\n",
+        "  -L, --max-fragment-length <N>   Max fragment length (default: 1300)\n",
+        "  -d, --disable-client-auth       Disable client authentication\n",
+        "  -c <FILE>                       Certificate file\n",
+        "  -k <FILE>                       Private key file\n",
+        "  -A <FILE>                       CA certificate file\n",
+        "  -p, --port <PORT>               Port (default: 8443)\n",
+        "      --addr <ADDR>               Bind address (default: 127.0.0.1)\n",
+        "  -B, --payload-size <N>          Payload bytes after handshake (default: 1000)\n",
+        "      --hybrid <FILE>             Enable hybrid KEMs with X25519 private key PEM\n",
+        "  -h, --help                      Show help\n",
+    ));
     std::process::exit(0);
 }
 
@@ -77,8 +88,12 @@ fn parse_value<T: std::str::FromStr>(
     iter: &mut std::iter::Peekable<impl Iterator<Item = String>>,
     flag: &str,
 ) -> Result<T, String> {
-    let value = iter.next().ok_or_else(|| format!("missing value for {flag}"))?;
-    value.parse::<T>().map_err(|_| format!("invalid value for {flag}: {value}"))
+    let value = iter
+        .next()
+        .ok_or_else(|| format!("missing value for {flag}"))?;
+    value
+        .parse::<T>()
+        .map_err(|_| format!("invalid value for {flag}: {value}"))
 }
 
 fn parse_args() -> Result<ServerArgs, String> {
@@ -88,29 +103,89 @@ fn parse_args() -> Result<ServerArgs, String> {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "-h" | "--help" => print_help_and_exit(),
-            "-a" | "--authkem" => args.authkem = parse_value(&mut iter, "--authkem")?,
+            "-a" | "--authkem" => {
+                let value: String = parse_value(&mut iter, "--authkem")?;
+                push_authkems(&mut args.authkems, &value);
+            }
             "-g" | "--group" => args.group = Some(parse_value(&mut iter, "--group")?),
-            "-c" | "--cid" => args.cid = Some(parse_value(&mut iter, "--cid")?),
-            "-L" | "--max-fragment-length" => args.max_fragment_length = parse_value(&mut iter, "--max-fragment-length")?,
+            "--keys-dir" => args.keys_dir = Some(parse_value(&mut iter, "--keys-dir")?),
+            "-q" | "--pqc-provider" => args.pqc_provider = true,
+            "--cid" => args.cid = Some(parse_value(&mut iter, "--cid")?),
+            "-L" | "--max-fragment-length" => {
+                args.max_fragment_length = parse_value(&mut iter, "--max-fragment-length")?
+            }
             "-d" | "--disable-client-auth" => args.client_auth = false,
+            "-c" => args.cert_file = parse_value(&mut iter, "-c")?,
+            "-k" => args.pk_file = parse_value(&mut iter, "-k")?,
+            "-A" => args.ca_file = parse_value(&mut iter, "-A")?,
             "-p" | "--port" => args.port = parse_value(&mut iter, "--port")?,
             "--addr" => args.addr = parse_value(&mut iter, "--addr")?,
-            "-B" | "--payload-size" => args.payload_size = parse_value(&mut iter, "--payload-size")?,
-            "--hybrid" => args.hybrid = true,
-            "-k" | "--x25519-key" => args.x25519_key = Some(parse_value(&mut iter, "--x25519-key")?),
-            _ if arg.starts_with("--authkem=") => args.authkem = arg["--authkem=".len()..].to_string(),
-            _ if arg.starts_with("--group=") => args.group = Some(arg["--group=".len()..].to_string()),
-            _ if arg.starts_with("--cid=") => args.cid = Some(arg["--cid=".len()..].parse().map_err(|_| format!("invalid value for --cid: {}", &arg["--cid=".len()..]))?),
-            _ if arg.starts_with("--max-fragment-length=") => args.max_fragment_length = arg["--max-fragment-length=".len()..].parse().map_err(|_| format!("invalid value for --max-fragment-length: {}", &arg["--max-fragment-length=".len()..]))?,
-            _ if arg.starts_with("--port=") => args.port = arg["--port=".len()..].parse().map_err(|_| format!("invalid value for --port: {}", &arg["--port=".len()..]))?,
+            "-B" | "--payload-size" => {
+                args.payload_size = parse_value(&mut iter, "--payload-size")?
+            }
+            "--hybrid" => args.hybrid_key = Some(parse_value(&mut iter, "--hybrid")?),
+            _ if arg.starts_with("--authkem=") => {
+                push_authkems(&mut args.authkems, &arg["--authkem=".len()..])
+            }
+            _ if arg.starts_with("--group=") => {
+                args.group = Some(arg["--group=".len()..].to_string())
+            }
+            _ if arg.starts_with("--keys-dir=") => {
+                args.keys_dir = Some(arg["--keys-dir=".len()..].to_string())
+            }
+            _ if arg.starts_with("--cid=") => {
+                args.cid = Some(
+                    arg["--cid=".len()..]
+                        .parse()
+                        .map_err(|_| {
+                            format!("invalid value for --cid: {}", &arg["--cid=".len()..])
+                        })?,
+                )
+            }
+            _ if arg.starts_with("--max-fragment-length=") => {
+                args.max_fragment_length = arg["--max-fragment-length=".len()..]
+                    .parse()
+                    .map_err(|_| {
+                        format!(
+                            "invalid value for --max-fragment-length: {}",
+                            &arg["--max-fragment-length=".len()..]
+                        )
+                    })?
+            }
+            _ if arg.starts_with("--port=") => {
+                args.port = arg["--port=".len()..]
+                    .parse()
+                    .map_err(|_| format!("invalid value for --port: {}", &arg["--port=".len()..]))?
+            }
             _ if arg.starts_with("--addr=") => args.addr = arg["--addr=".len()..].to_string(),
-            _ if arg.starts_with("--payload-size=") => args.payload_size = arg["--payload-size=".len()..].parse().map_err(|_| format!("invalid value for --payload-size: {}", &arg["--payload-size=".len()..]))?,
-            _ if arg.starts_with("--x25519-key=") => args.x25519_key = Some(arg["--x25519-key=".len()..].to_string()),
+            _ if arg.starts_with("--payload-size=") => {
+                args.payload_size = arg["--payload-size=".len()..]
+                    .parse()
+                    .map_err(|_| {
+                        format!(
+                            "invalid value for --payload-size: {}",
+                            &arg["--payload-size=".len()..]
+                        )
+                    })?
+            }
+            _ if arg.starts_with("--hybrid=") => {
+                args.hybrid_key = Some(arg["--hybrid=".len()..].to_string())
+            }
             _ => return Err(format!("unknown argument: {arg}")),
         }
     }
 
     Ok(args)
+}
+
+fn push_authkems(authkems: &mut Vec<String>, value: &str) {
+    authkems.extend(
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(ToOwned::to_owned),
+    );
 }
 
 fn get_kem_algorithm(algorithm: &str) -> Result<oqs::kem::Algorithm, String> {
@@ -129,54 +204,162 @@ fn get_kem_algorithm(algorithm: &str) -> Result<oqs::kem::Algorithm, String> {
     }
 }
 
-fn select_kx_group(crypto_provider: &mut CryptoProvider, group: &str) {
-    if let Some(selected_group) = get_pq_kx_group_by_name(group) {
+fn select_kx_group(crypto_provider: &mut CryptoProvider, group: &str, pqc_provider: bool) {
+    let selected_group = if pqc_provider {
+        get_pq_kx_group_by_name(group)
+    } else {
+        get_kx_group_by_name(group)
+    };
+
+    if let Some(selected_group) = selected_group {
         crypto_provider.kx_groups = vec![selected_group];
     } else {
         println!("Unknown group, using default groups");
-        println!("Available groups: MLKEM512, MLKEM768, MLKEM1024, BikeL1, BikeL3, BikeL5, Hqc128, Hqc192, Hqc256, NtruPrimeSntrup761");
+        if pqc_provider {
+            println!(
+                "Available PQ/PQ-hybrid groups: MLKEM512, MLKEM768, MLKEM1024, BikeL1, BikeL3, BikeL5, Hqc128, Hqc192, Hqc256, NtruPrimeSntrup761 and hybrid variants with X25519"
+            );
+        } else {
+            println!("Available traditional groups: X25519, SECP256R1, SECP384R1");
+        }
     }
 }
 
-fn create_server_config(
+fn combined_kx_groups() -> Vec<&'static dyn SupportedKxGroup> {
+    let mut groups = DEFAULT_KX_GROUPS.to_vec();
+    groups.extend_from_slice(KX_GROUPS);
+    groups
+}
+
+fn selected_auth_group(
     kemalg: oqs::kem::Algorithm,
-    crypto_provider: CryptoProvider,
-    client_auth: bool,
     hybrid: bool,
-    x25519_key_path: Option<String>,
-) -> Result<ServerConfig, Box<dyn std::error::Error>> {
-    let kem = Kem::new(kemalg).map_err(|e| format!("Failed to create Kem instance: {e:?}"))?;
-    let (public_key, secret_key) = kem.keypair().map_err(|e| format!("Failed to generate Kem keypair: {e:?}"))?;
-
-    let signing_key = Arc::new(DummySigningKey);
-    
-    let (kem_key, x25519_sk, x25519_pk) = match hybrid {
-        true => {
-            let path = x25519_key_path.ok_or("Invalid x25519 key path")?;
-            let (x25519_sk, x25519_pk) = load_x25519_keypair_from_pem(&path)?;
-
-            let kem_key: Arc<dyn KemKey> = Arc::new(HybridKemKey::new(kemalg,secret_key.as_ref().to_vec(), x25519_sk));
-            (kem_key, Some(x25519_sk), Some(x25519_pk))
-        },
-        false => {
-            let kem_key: Arc<dyn KemKey> = Arc::new(PureKemKey::new(kemalg, secret_key.as_ref().to_vec()));
-            (kem_key, None, None)
+) -> Result<rustls::NamedGroup, Box<dyn std::error::Error>> {
+    let group = match (kemalg, hybrid) {
+        (oqs::kem::Algorithm::MlKem512, false) => rustls::NamedGroup::MLKEM512,
+        (oqs::kem::Algorithm::MlKem768, false) => rustls::NamedGroup::MLKEM768,
+        (oqs::kem::Algorithm::MlKem1024, false) => rustls::NamedGroup::MLKEM1024,
+        (oqs::kem::Algorithm::BikeL1, false) => rustls::NamedGroup::BikeL1,
+        (oqs::kem::Algorithm::BikeL3, false) => rustls::NamedGroup::BikeL3,
+        (oqs::kem::Algorithm::BikeL5, false) => rustls::NamedGroup::BikeL5,
+        (oqs::kem::Algorithm::Hqc128, false) => rustls::NamedGroup::Hqc128,
+        (oqs::kem::Algorithm::Hqc192, false) => rustls::NamedGroup::Hqc192,
+        (oqs::kem::Algorithm::Hqc256, false) => rustls::NamedGroup::Hqc256,
+        (oqs::kem::Algorithm::NtruPrimeSntrup761, false) => rustls::NamedGroup::NtruPrimeSntrup761,
+        (oqs::kem::Algorithm::MlKem512, true) => rustls::NamedGroup::X25519MLKEM512,
+        (oqs::kem::Algorithm::MlKem768, true) => rustls::NamedGroup::X25519MLKEM768,
+        (oqs::kem::Algorithm::MlKem1024, true) => rustls::NamedGroup::X25519MLKEM1024,
+        (oqs::kem::Algorithm::BikeL1, true) => rustls::NamedGroup::X25519BikeL1,
+        (oqs::kem::Algorithm::BikeL3, true) => rustls::NamedGroup::X25519BikeL3,
+        (oqs::kem::Algorithm::BikeL5, true) => rustls::NamedGroup::X25519BikeL5,
+        (oqs::kem::Algorithm::Hqc128, true) => rustls::NamedGroup::X25519Hqc128,
+        (oqs::kem::Algorithm::Hqc192, true) => rustls::NamedGroup::X25519Hqc192,
+        (oqs::kem::Algorithm::Hqc256, true) => rustls::NamedGroup::X25519Hqc256,
+        (oqs::kem::Algorithm::NtruPrimeSntrup761, true) => {
+            rustls::NamedGroup::X25519NtruPrimeSntrup761
+        }
+        _ => {
+            return Err("Unsupported auth KEM group".into());
         }
     };
 
-    // Create our key pair structure
-    let key_pair = KeyPair::new(public_key, x25519_pk, signing_key, Some(kem_key));
+    Ok(group)
+}
 
-    let resolver = Arc::new(ServerCertResolver::new(key_pair));
-    let client_verifier = Arc::new(ServerVerifier::new(kemalg, x25519_sk, x25519_pk));
+fn auth_groups_from_args(
+    authkems: &[String],
+    hybrid: bool,
+) -> Result<Vec<rustls::NamedGroup>, Box<dyn std::error::Error>> {
+    if authkems.is_empty() {
+        return Ok(supported_kemtls_groups(hybrid));
+    }
+
+    let groups: Vec<rustls::NamedGroup> = authkems
+        .iter()
+        .map(|authkem| {
+            let kemalg = get_kem_algorithm(authkem)?;
+            selected_auth_group(kemalg, hybrid)
+        })
+        .collect::<Result<_, _>>()?;
+
+    let mut deduped = Vec::new();
+    for group in groups {
+        if !deduped.contains(&group) {
+            deduped.push(group);
+        }
+    }
+    Ok(deduped)
+}
+
+fn create_server_config(
+    auth_groups: Vec<rustls::NamedGroup>,
+    crypto_provider: CryptoProvider,
+    client_auth: bool,
+    cert_file: &str,
+    pk_file: &str,
+    ca_file: &str,
+    keys_dir: Option<String>,
+    hybrid_key_path: Option<String>,
+) -> Result<ServerConfig, Box<dyn std::error::Error>> {
+    let keys_dir = keys_dir.map(PathBuf::from).unwrap_or_else(default_keys_dir);
+    let signing_key = Arc::new(DummySigningKey);
+    let cert = CertificateDer::pem_file_iter(cert_file)?
+        .map(|cert| cert.map_err(|e| format!("error reading certificate: {e}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let pk = rustls::pki_types::PrivateKeyDer::from_pem_file(pk_file)?;
+    let traditional_certified_key = Arc::new(rustls::sign::CertifiedKey::from_der(
+        cert,
+        pk,
+        &crypto_provider,
+    )?);
+
+    let x25519_key_path = hybrid_key_path.map(PathBuf::from);
+    let (x25519_sk, x25519_pk) = match &x25519_key_path {
+        Some(path) => {
+            let (x25519_sk, x25519_pk) = load_x25519_keypair_from_pem(&path)?;
+            (Some(x25519_sk), Some(x25519_pk))
+        }
+        None => (None, None),
+    };
+
+    let resolver = Arc::new(ServerCertResolver::load_kemtls_keys(
+        Some(traditional_certified_key),
+        keys_dir,
+        &auth_groups,
+        signing_key,
+        x25519_key_path,
+    )?);
 
     let mut server_config = match client_auth {
-        true => ServerConfig::builder_with_provider(crypto_provider.into())
+        true => {
+            let mut root_store = RootCertStore::empty();
+            root_store.add_parsable_certificates(
+                CertificateDer::pem_file_iter(ca_file)?
+                    .map(|cert| cert.map_err(|e| format!("error reading CA certificate: {e}")))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+
+            let traditional_verifier = WebPkiClientVerifier::builder_with_provider(
+                root_store.into(),
+                Arc::new(crypto_provider.clone()),
+            )
+            .build()?;
+            let client_verifier = Arc::new(ServerVerifier::new(
+                Some(traditional_verifier),
+                x25519_sk,
+                x25519_pk,
+            ));
+
+            ServerConfig::builder_with_provider(crypto_provider.into())
+                .with_safe_default_protocol_versions()?
+                .with_kemtls_groups(auth_groups.clone())
+                .with_client_cert_verifier(client_verifier)
+                .with_cert_resolver(resolver)
+        }
+        false => ServerConfig::builder_with_provider(crypto_provider.into())
             .with_safe_default_protocol_versions()?
-            //.enable_kemtls()
-            .with_client_cert_verifier(client_verifier)
+            .with_no_client_auth()
             .with_cert_resolver(resolver),
-        false => ServerConfig::builder_with_provider(crypto_provider.into()).with_safe_default_protocol_versions()?.with_no_client_auth().with_cert_resolver(resolver)
     };
 
     server_config.key_log = Arc::new(rustls::KeyLogFile::new());
@@ -187,38 +370,6 @@ fn create_server_config(
 
     println!("Server config created successfully");
     Ok(server_config)
-}
-
-fn load_x25519_keypair_from_pem(path: &str) -> Result<([u8; 32], [u8; 32]), Error> {
-    let pem = fs::read(path)
-        .map_err(|e| Error::General(format!("failed to read x25519 key file: {e}")))?;
-
-    let pkey = PKey::private_key_from_pem(&pem)
-        .map_err(|e| Error::General(format!("failed to parse x25519 private key PEM: {e}")))?;
-
-    if pkey.id() != Id::X25519 {
-        return Err(Error::General("provided key is not X25519".into()));
-    }
-
-    let raw_sk = pkey
-        .raw_private_key()
-        .map_err(|e| Error::General(format!("failed to extract raw x25519 private key: {e}")))?;
-
-    let raw_pk = pkey
-        .raw_public_key()
-        .map_err(|e| Error::General(format!("failed to extract raw x25519 public key: {e}")))?;
-
-    let sk: [u8; 32] = raw_sk
-        .as_slice()
-        .try_into()
-        .map_err(|_| Error::General("invalid raw x25519 private key length".into()))?;
-
-    let pk: [u8; 32] = raw_pk
-        .as_slice()
-        .try_into()
-        .map_err(|_| Error::General("invalid raw x25519 public key length".into()))?;
-
-    Ok((sk, pk))
 }
 
 // TLS Helper Functions
@@ -273,7 +424,11 @@ fn handle_tls_client(
     Ok(())
 }
 
-fn run_tls_server(server_config: ServerConfig, addr: String, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+fn run_tls_server(
+    server_config: ServerConfig,
+    addr: String,
+    port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(format!("{}:{}", addr, port))?;
     println!("TLS server listening on port {}", port);
 
@@ -302,7 +457,8 @@ enum ClientState {
     Connected {
         conn: ServerConnection,
         response_sent: bool,
-        received_app_data: usize,
+        request_buffer: Vec<u8>,
+        expected_request_len: Option<usize>,
         last_seen: Instant,
     },
 }
@@ -317,7 +473,10 @@ impl ClientState {
         payload_size: usize,
     ) -> Result<bool, Box<dyn std::error::Error>> {
         match self {
-            ClientState::Handshaking { acceptor, last_seen } => {
+            ClientState::Handshaking {
+                acceptor,
+                last_seen,
+            } => {
                 *last_seen = Instant::now();
                 let mut slice = packet;
                 acceptor.read_tls(&mut slice)?;
@@ -337,18 +496,18 @@ impl ClientState {
                                 return Err(format!("Connection error: {:?}", err).into());
                             }
                         };
-                        
+
                         Self::write_pending(&mut conn, socket, addr)?;
 
                         *self = ClientState::Connected {
                             conn,
                             response_sent: false,
-                            received_app_data: 0,
+                            request_buffer: Vec::new(),
+                            expected_request_len: None,
                             last_seen: Instant::now(),
                         };
                     }
-                    Ok(None) => {
-                    }
+                    Ok(None) => {}
                     Err((err, mut alert)) => {
                         let mut out = Vec::new();
                         alert.write(&mut out).ok();
@@ -357,39 +516,58 @@ impl ClientState {
                     }
                 }
             }
-            ClientState::Connected { conn, response_sent, received_app_data, last_seen } => {
+            ClientState::Connected {
+                conn,
+                response_sent,
+                request_buffer,
+                expected_request_len,
+                last_seen,
+            } => {
                 *last_seen = Instant::now();
                 let mut slice = packet;
                 if let Err(e) = conn.read_tls(&mut slice) {
                     let _ = Self::write_pending(conn, socket, addr);
                     return Err(Box::new(e));
                 }
-                if let Err(e) = conn.process_new_packets() {
-                    eprintln!("Error fatal procesando paquetes: {:?}", e);
-                    let _ = Self::write_pending(conn, socket, addr);
-                    return Err(Box::new(e));
-                }
-
-                let io_state = conn.process_new_packets()?;
+                let io_state = match conn.process_new_packets() {
+                    Ok(io_state) => io_state,
+                    Err(e) => {
+                        eprintln!("Error fatal procesando paquetes: {:?}", e);
+                        let _ = Self::write_pending(conn, socket, addr);
+                        return Err(Box::new(e));
+                    }
+                };
 
                 if io_state.plaintext_bytes_to_read() > 0 {
-                    let mut reader = conn.reader();
-                    let mut discard = vec![0u8; io_state.plaintext_bytes_to_read()];
-                    if reader.read_exact(&mut discard).is_ok() {
-                        *received_app_data += discard.len();
+                    let mut tmp = [0u8; BUFFER_SIZE];
+                    loop {
+                        let mut reader = conn.reader();
+                        match reader.read(&mut tmp) {
+                            Ok(0) => break,
+                            Ok(n) => request_buffer.extend_from_slice(&tmp[..n]),
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                            Err(e) => return Err(Box::new(e)),
+                        }
                     }
 
-                    if !*response_sent && *received_app_data >= payload_size {
+                    if expected_request_len.is_none() && request_buffer.len() >= APP_FRAME_HEADER_LEN {
+                        let frame_len = u32::from_be_bytes(
+                            request_buffer[..APP_FRAME_HEADER_LEN]
+                                .try_into()
+                                .expect("frame header has fixed size"),
+                        ) as usize;
+                        *expected_request_len = Some(frame_len);
+                    }
+
+                    if !*response_sent
+                        && request_complete(request_buffer, *expected_request_len)
+                    {
                         send_zero_payload(conn, payload_size)?;
                         *response_sent = true;
                     }
                 }
 
                 Self::write_pending(conn, socket, addr)?;
-
-                if *response_sent && *received_app_data >= payload_size && !conn.wants_write() {
-                    return Ok(true); 
-                }
             }
         }
         Ok(false)
@@ -413,13 +591,16 @@ impl ClientState {
                 }
                 Self::write_pending(conn, socket, addr)?;
             }
-            ClientState::Handshaking { .. } => {
-            }
+            ClientState::Handshaking { .. } => {}
         }
         Ok(())
     }
 
-    fn write_pending(conn: &mut ServerConnection, socket: &UdpSocket, addr: SocketAddr) -> Result<(), std::io::Error> {
+    fn write_pending(
+        conn: &mut ServerConnection,
+        socket: &UdpSocket,
+        addr: SocketAddr,
+    ) -> Result<(), std::io::Error> {
         while conn.wants_write() {
             let mut out_buf = Vec::new();
             if conn.write_dtls(&mut out_buf)? > 0 {
@@ -430,14 +611,22 @@ impl ClientState {
     }
 }
 
-fn send_zero_payload(conn: &mut ServerConnection, size: usize) -> Result<(), std::io::Error> {
-    use std::fs::File;
-    use std::io::Read;
+fn request_complete(buffer: &[u8], expected_len: Option<usize>) -> bool {
+    matches!(
+        expected_len,
+        Some(frame_len) if buffer.len() >= APP_FRAME_HEADER_LEN + frame_len
+    )
+}
 
-    let mut file = File::open("/dev/zero")?;
-    let mut buffer = vec![0u8; size];
-    file.read_exact(&mut buffer)?;
-    
+fn build_zero_payload_frame(size: usize) -> Vec<u8> {
+    let mut buffer = Vec::with_capacity(APP_FRAME_HEADER_LEN + size);
+    buffer.extend_from_slice(&(size as u32).to_be_bytes());
+    buffer.resize(APP_FRAME_HEADER_LEN + size, 0);
+    buffer
+}
+
+fn send_zero_payload(conn: &mut ServerConnection, size: usize) -> Result<(), std::io::Error> {
+    let buffer = build_zero_payload_frame(size);
     conn.writer().write_all(&buffer)?;
     Ok(())
 }
@@ -472,7 +661,13 @@ fn run_dtls_server(
                         }
                     });
 
-                    match state.handle_datagram(packet, &socket, addr, server_config.clone(), payload_size) {
+                    match state.handle_datagram(
+                        packet,
+                        &socket,
+                        addr,
+                        server_config.clone(),
+                        payload_size,
+                    ) {
                         Ok(true) => {
                             println!("Sesión finalizada con éxito: {}", addr);
                             clients.remove(&addr);
@@ -481,7 +676,7 @@ fn run_dtls_server(
                             eprintln!("Error en sesión {}: {:?}", addr, e);
                             clients.remove(&addr);
                         }
-                        Ok(false) => {} 
+                        Ok(false) => {}
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -494,7 +689,7 @@ fn run_dtls_server(
                         if now.duration_since(*last) > Duration::from_secs(10) {
                             println!("Sesión expirada: {}", addr);
                             return false;
-                        }  
+                        }
                         if let Err(err) = state.handle_timeout(&socket, *addr) {
                             eprintln!("Error en retransmisión para {}: {:?}", addr, err);
                             return false;
@@ -524,24 +719,29 @@ fn main() {
 
     println!("Starting KEMTLS Server...");
 
-    let kemalg = match get_kem_algorithm(&args.authkem) {
-        Ok(alg) => {
-            println!("Selected KEM for authentication: {}", alg);
-            alg
+    let hybrid = args.hybrid_key.is_some();
+    let auth_groups = match auth_groups_from_args(&args.authkems, hybrid) {
+        Ok(groups) => {
+            println!("Loaded {} authentication KEM group(s)", groups.len());
+            for group in &groups {
+                println!("  Auth group: {:?}", group);
+            }
+            groups
         }
         Err(e) => {
-            debug!("Error with authkem algorithm: {}", e);
+            debug!("Error with authkem algorithm list: {}", e);
             std::process::exit(1);
         }
     };
 
     let mut crypto_provider = provider();
+    crypto_provider.kx_groups = combined_kx_groups();
 
     if let Some(ref group_name) = args.group {
         println!("Selecting KX group: {}", group_name);
-        select_kx_group(&mut crypto_provider, group_name);
+        select_kx_group(&mut crypto_provider, group_name, args.pqc_provider);
     } else {
-        println!("Using all available KX groups");
+        println!("Using all available traditional and PQ KX groups");
     }
 
     println!("Provider has {} kx_groups", crypto_provider.kx_groups.len());
@@ -549,7 +749,16 @@ fn main() {
         println!("  KX group: {:?}", kx.name());
     }
 
-    let mut server_config = match create_server_config(kemalg, crypto_provider, args.client_auth, args.hybrid, args.x25519_key) {
+    let mut server_config = match create_server_config(
+        auth_groups,
+        crypto_provider,
+        args.client_auth,
+        &args.cert_file,
+        &args.pk_file,
+        &args.ca_file,
+        args.keys_dir,
+        args.hybrid_key,
+    ) {
         Ok(config) => config,
         Err(e) => {
             debug!("Failed to create server config: {:?}", e);
@@ -563,12 +772,12 @@ fn main() {
 
         if let Some(cid_val) = args.cid {
             println!("Offering CID: {}", cid_val);
-            server_config.set_cid(&[cid_val]);
+            let _ = server_config.set_cid(&[cid_val]);
         }
 
         run_dtls_server(server_config, args.addr, args.port, args.payload_size)
     } else {
-        run_tls_server(server_config, args.addr,args.port)
+        run_tls_server(server_config, args.addr, args.port)
     };
 
     if let Err(e) = result {

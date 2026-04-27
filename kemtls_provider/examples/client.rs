@@ -7,12 +7,15 @@ use std::convert::TryInto;
 use std::io::{stdout, Read, Write};
 use std::net::{TcpStream, UdpSocket};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use rustls::crypto::CryptoProvider;
 use std::cmp::Ordering;
 
 const BUFFER_SIZE: usize = 4096;
+const APP_FRAME_HEADER_LEN: usize = 4;
 const TIMEOUT_SECS: u64 = 1;
+const APP_RESPONSE_TIMEOUT_SECS: u64 = 1;
+const MAX_APP_RETRIES: usize = 3;
 
 // DTLS Helper Functions
 
@@ -167,6 +170,19 @@ fn setup_udp_socket(server_addr: &str, local_port: Option<u16>) -> Result<UdpSoc
     Ok(socket)
 }
 
+fn is_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
+fn is_timeout_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .map(is_error)
+        .unwrap_or(false)
+}
+
 fn send_dtls_datagram(
     socket: &UdpSocket,
     conn: &mut ClientConnection,
@@ -198,7 +214,7 @@ fn receive_dtls_datagram(
             }
             conn.process_new_packets()?;
         }
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock =>{
+        Err(e) if is_error(&e) => {
             conn.process_new_packets()?;
         }    
         Err(e) =>{
@@ -235,52 +251,109 @@ fn send_http_request(
     conn: &mut ClientConnection,
     payload_size: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use std::fs::File;
-    use std::io::Read;
-
-    let mut file = std::fs::File::open("/dev/zero")?;
-    let mut buffer = vec![0u8; payload_size];
-    file.read_exact(&mut buffer)?;
-
+    let buffer = build_zero_payload_frame(payload_size);
     conn.writer().write_all(&buffer)?;
     send_dtls_datagram(socket, conn)?;
     debug!("HTTP request sent");
     Ok(())
 }
 
+fn build_zero_payload_frame(payload_size: usize) -> Vec<u8> {
+    let mut buffer = Vec::with_capacity(APP_FRAME_HEADER_LEN + payload_size);
+    buffer.extend_from_slice(&(payload_size as u32).to_be_bytes());
+    buffer.resize(APP_FRAME_HEADER_LEN + payload_size, 0);
+    buffer
+}
+
+fn try_extract_frame(buffer: &[u8]) -> Option<Vec<u8>> {
+    if buffer.len() < APP_FRAME_HEADER_LEN {
+        return None;
+    }
+
+    let payload_len = u32::from_be_bytes(
+        buffer[..APP_FRAME_HEADER_LEN]
+            .try_into()
+            .expect("frame header has fixed size"),
+    ) as usize;
+
+    if buffer.len() < APP_FRAME_HEADER_LEN + payload_len {
+        return None;
+    }
+
+    Some(buffer[APP_FRAME_HEADER_LEN..APP_FRAME_HEADER_LEN + payload_len].to_vec())
+}
+
 fn receive_http_response(
     socket: &UdpSocket,
     conn: &mut ClientConnection,
+    deadline: Instant,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut in_buf = [0u8; BUFFER_SIZE];
-    let mut plaintext = Vec::new();
+    let mut framed_plaintext = Vec::new();
     let mut tmp = [0u8; BUFFER_SIZE];
 
     loop {
-        {
+        loop {
             let mut reader = conn.reader();
             match reader.read(&mut tmp) {
-                Ok(0) => {}
-                Ok(n) => {
-                    plaintext.extend_from_slice(&tmp[..n]);
-                    if plaintext.len() > 0 && n < BUFFER_SIZE {
-                        break;
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Ok(0) => break,
+                Ok(n) => framed_plaintext.extend_from_slice(&tmp[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(e) => return Err(Box::new(e)),
             }
         }
 
-        if plaintext.is_empty() {
-            receive_dtls_datagram(socket, conn, &mut in_buf)?;
-        } else {
-            break;
+        if let Some(frame) = try_extract_frame(&framed_plaintext) {
+            return Ok(frame);
+        }
+
+        if Instant::now() >= deadline {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out waiting for application response",
+            )));
+        }
+
+        receive_dtls_datagram(socket, conn, &mut in_buf)?;
+    }
+}
+
+fn exchange_application_data(
+    socket: &UdpSocket,
+    conn: &mut ClientConnection,
+    payload_size: usize,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut last_err: Option<Box<dyn std::error::Error>> = None;
+
+    for attempt in 0..MAX_APP_RETRIES {
+        send_http_request(socket, conn, payload_size)?;
+
+        match receive_http_response(
+            socket,
+            conn,
+            Instant::now() + Duration::from_secs(APP_RESPONSE_TIMEOUT_SECS),
+        ) {
+            Ok(response) => return Ok(response),
+            Err(e) if attempt + 1 < MAX_APP_RETRIES && is_timeout_error(e.as_ref()) => {
+                debug!(
+                    "application response timed out, retrying request ({}/{})",
+                    attempt + 2,
+                    MAX_APP_RETRIES
+                );
+                last_err = Some(e);
+            }
+            Err(e) => return Err(e),
         }
     }
 
-    Ok(plaintext)
+    Err(last_err.unwrap_or_else(|| {
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "application request retries exhausted",
+        ))
+    }))
 }
+
 
 fn run_dtls_client(
     client_config: ClientConfig,
@@ -293,11 +366,8 @@ fn run_dtls_client(
 
     perform_dtls_handshake(&socket, &mut conn)?;
 
-    let request = b"Hello from DTLS client!\n";
-    send_http_request(&socket, &mut conn, payload_size)?;
-
     println!("Waiting for response...");
-    let response = receive_http_response(&socket, &mut conn)?;
+    let response = exchange_application_data(&socket, &mut conn, payload_size)?;
 
     println!("Response received:");
     println!("{:?}", String::from_utf8_lossy(&response));
@@ -414,7 +484,7 @@ fn main() {
 
         if let Some(cid_val) = args.cid {
             println!("Offering CID: {}", cid_val);
-            client_config.set_cid(&[cid_val]);
+            let _ = client_config.set_cid(&[cid_val]);
         }
         
         if args.iterations > 1 || args.csv.is_some() {
@@ -502,17 +572,7 @@ fn run_one_dtls_connection(
     let t1 = std::time::Instant::now();
     let handshake_ms = t1.duration_since(t0).as_secs_f64() * 1000.0;
 
-    if let Err(e) = send_http_request(&socket, &mut conn, payload_size) {
-        return BenchRow {
-            iter,
-            status: "ERROR".to_string(),
-            handshake_ms: Some(handshake_ms),
-            transaction_ms: None,
-            error: Some(format!("send_app: {}", e)),
-        };
-    }
-
-    match receive_http_response(&socket, &mut conn) {
+    match exchange_application_data(&socket, &mut conn, payload_size) {
         Ok(_response) => {
             let t2 = std::time::Instant::now();
             let transaction_ms = t2.duration_since(t0).as_secs_f64() * 1000.0;
@@ -530,7 +590,7 @@ fn run_one_dtls_connection(
             status: "ERROR".to_string(),
             handshake_ms: Some(handshake_ms),
             transaction_ms: None,
-            error: Some(format!("recv_app: {}", e)),
+            error: Some(format!("app_exchange: {}", e)),
         },
     }
 }

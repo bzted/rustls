@@ -1,7 +1,5 @@
 use core::mem;
 
-use log::debug;
-
 use crate::error::{Error, InvalidMessage};
 use crate::msgs::codec::Reader;
 use crate::msgs::message::{

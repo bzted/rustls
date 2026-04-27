@@ -32,7 +32,6 @@ use crate::msgs::base::PayloadU8;
 use crate::msgs::enums::{
     CertificateType, Compression, ECPointFormat, ExtensionType, PSKKeyExchangeMode,
 };
-use crate::msgs::fragmenter::DtlsFragment;
 use crate::msgs::handshake::EarlyAuth;
 use crate::msgs::handshake::StoredAuthKey;
 use crate::msgs::handshake::{
@@ -42,7 +41,6 @@ use crate::msgs::handshake::{
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist;
-use crate::server;
 use crate::sync::Arc;
 use crate::tls13::key_schedule::KeyScheduleEarly;
 use crate::verify::ServerCertVerifier;
@@ -450,6 +448,10 @@ fn emit_client_hello_for_retry(
                 debug!("Failed to encapsulate to authkem psk key: {:?}", err);
             }
         }
+    }
+
+    if !config.kemtls_groups.is_empty() {
+        exts.push(ClientExtension::Kemtls(config.kemtls_groups.clone()));
     }
 
     if is_dtls {
@@ -861,6 +863,13 @@ pub(super) fn process_client_cert_type_extension(
     config: &ClientConfig,
     client_cert_extension: Option<&CertificateType>,
 ) -> Result<Option<(ExtensionType, CertificateType)>, Error> {
+    if !config
+        .client_auth_cert_resolver
+        .has_certs()
+    {
+        return Ok(None);
+    }
+
     process_cert_type_extension(
         common,
         config

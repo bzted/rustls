@@ -1,11 +1,9 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use log::trace;
 use pki_types::CertificateDer;
 
 use crate::crypto::SupportedKxGroup;
-use crate::dtls13::ack::AckMessage;
 use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
@@ -21,7 +19,7 @@ use crate::msgs::message::{
     PlainMessage,
 };
 use crate::record_common::AnyRecordLayer;
-use crate::record_layer::{PreEncryptAction, RecordLayer};
+use crate::record_layer::PreEncryptAction;
 use crate::suites::{PartiallyExtractedSecrets, SupportedCipherSuite};
 #[cfg(feature = "tls12")]
 use crate::tls12::ConnectionSecrets;

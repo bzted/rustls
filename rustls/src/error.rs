@@ -263,6 +263,7 @@ pub enum PeerMisbehaved {
     SelectedUnofferedCompression,
     SelectedUnofferedKxGroup,
     SelectedUnofferedPsk,
+    SelectedUnofferedKemtlsGroup,
     SelectedUnusableCipherSuiteForVersion,
     ServerEchoedCompatibilitySessionId,
     ServerHelloMustOfferUncompressedEcPoints,

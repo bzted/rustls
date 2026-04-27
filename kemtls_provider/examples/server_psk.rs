@@ -1,11 +1,14 @@
-use kemtls_provider::resolver::{KeyPair, ServerCertResolver};
+use kemtls_provider::resolver::ServerCertResolver;
 use kemtls_provider::sign::DummySigningKey;
 use kemtls_provider::verify::ServerVerifier;
 use kemtls_provider::{get_kx_group_by_name, provider, PureKemKey};
 use log::debug;
 use oqs::kem::Kem;
 use rustls::crypto::CryptoProvider;
+use rustls::pki_types::CertificateDer;
+use rustls::sign::{CertifiedKey, KemKey};
 use rustls::ServerConfig;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::{fs, io};
@@ -97,14 +100,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = Arc::new(DummySigningKey);
 
     let kem_key = Arc::new(PureKemKey::new(kemalg, secret_key.as_ref().to_vec()));
-    // Create our key pair structure
-    let key_pair = KeyPair::new(public_key, None, signing_key, Some(kem_key));
+    let certified_key = Arc::new(CertifiedKey {
+        cert: vec![CertificateDer::from(public_key.as_ref().to_vec())],
+        key: signing_key,
+        ocsp: None,
+        kem_key: Some(kem_key.clone()),
+    });
+    let mut kemtls_certified_keys = HashMap::new();
+    kemtls_certified_keys.insert(u16::from(kem_key.algorithm()), certified_key);
 
     // Create our custom resolver
-    let resolver = Arc::new(ServerCertResolver::new(key_pair));
+    let resolver = Arc::new(ServerCertResolver::kemtls_only(kemtls_certified_keys));
 
     // Create our custom verifier
-    let client_verifier = Arc::new(ServerVerifier::new(kemalg, None, None));
+    let client_verifier = Arc::new(ServerVerifier::new(None, None, None));
 
     // Set up TLS server with AuthKEM provider
     let mut crypto_provider = provider();

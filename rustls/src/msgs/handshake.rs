@@ -5,7 +5,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Deref;
 use core::{fmt, iter};
-use log::{debug, trace};
 
 use pki_types::{CertificateDer, DnsName};
 
@@ -606,6 +605,7 @@ pub enum ClientExtension {
     AuthorityNames(Vec<DistinguishedName>),
     StoredAuthKey(StoredAuthKey), // Added extensions
     ConnectionId(ConnectionId),
+    Kemtls(Vec<NamedGroup>), // Added kemtls extension
     EarlyAuth(EarlyAuth),         // Added extensions
     Unknown(UnknownExtension),
 }
@@ -639,6 +639,7 @@ impl ClientExtension {
             Self::AuthorityNames(_) => ExtensionType::CertificateAuthorities,
             Self::StoredAuthKey(_) => ExtensionType::StoredAuthKey,
             Self::ConnectionId(_) => ExtensionType::ConnectionId,
+            Self::Kemtls(_) => ExtensionType::Kemtls,
             Self::EarlyAuth(_) => ExtensionType::EarlyAuth,
             Self::Unknown(r) => r.typ,
         }
@@ -677,6 +678,7 @@ impl Codec<'_> for ClientExtension {
             Self::AuthorityNames(r) => r.encode(nested.buf),
             Self::StoredAuthKey(r) => r.encode(nested.buf),
             Self::ConnectionId(r) => r.encode(nested.buf),
+            Self::Kemtls(r) => r.encode(nested.buf),
             Self::EarlyAuth(_) => {} // EarlyAuth extension is empty
             Self::Unknown(r) => r.encode(nested.buf),
         }
@@ -729,6 +731,7 @@ impl Codec<'_> for ClientExtension {
             ExtensionType::CertificateAuthorities => Self::AuthorityNames(Vec::read(&mut sub)?),
             ExtensionType::StoredAuthKey => Self::StoredAuthKey(StoredAuthKey::read(&mut sub)?),
             ExtensionType::ConnectionId => Self::ConnectionId(ConnectionId::read(&mut sub)?),
+            ExtensionType::Kemtls => Self::Kemtls(Vec::read(&mut sub)?),
             ExtensionType::EarlyAuth if !sub.any_left() => Self::EarlyAuth(EarlyAuth {}),
             _ => Self::Unknown(UnknownExtension::read(typ, &mut sub)),
         };
@@ -792,6 +795,7 @@ pub enum ServerExtension {
     StoredAuthKey,
     ConnectionId(ConnectionId),
     EarlyAuth,
+    Kemtls(Vec<NamedGroup>), // Added kemtls extension
     Unknown(UnknownExtension),
 }
 
@@ -816,6 +820,7 @@ impl ServerExtension {
             Self::EncryptedClientHello(_) => ExtensionType::EncryptedClientHello,
             Self::StoredAuthKey => ExtensionType::StoredAuthKey,
             Self::ConnectionId(_) => ExtensionType::ConnectionId,
+            Self::Kemtls(_) => ExtensionType::Kemtls,
             Self::EarlyAuth => ExtensionType::EarlyAuth,
             Self::Unknown(r) => r.typ,
         }
@@ -847,6 +852,7 @@ impl Codec<'_> for ServerExtension {
             Self::EncryptedClientHello(r) => r.encode(nested.buf),
             Self::StoredAuthKey => 1u8.encode(nested.buf), // We send a '1'
             Self::ConnectionId(r) => r.encode(nested.buf),
+            Self::Kemtls(r) => r.encode(nested.buf),
             Self::EarlyAuth => {}                          // EarlyAuth extension is empty
             Self::Unknown(r) => r.encode(nested.buf),
         }
@@ -892,6 +898,7 @@ impl Codec<'_> for ServerExtension {
                 Self::StoredAuthKey
             }
             ExtensionType::ConnectionId => Self::ConnectionId(ConnectionId::read(&mut sub)?),
+            ExtensionType::Kemtls => Self::Kemtls(Vec::read(&mut sub)?),
             ExtensionType::EarlyAuth if !sub.any_left() => Self::EarlyAuth,
             _ => Self::Unknown(UnknownExtension::read(typ, &mut sub)),
         };
@@ -1237,6 +1244,15 @@ impl ClientHelloPayload {
                 }
             })
     }
+
+    pub(crate) fn kemtls_extension(&self) -> Option<&[NamedGroup]> {
+        let ext = self.find_extension(ExtensionType::Kemtls)?;
+        match ext {
+            ClientExtension::Kemtls(kemalgs) => Some(kemalgs),
+            _ => None,
+        }
+    }
+
     #[cfg(feature = "tls12")]
     pub(crate) fn ems_support_offered(&self) -> bool {
         self.find_extension(ExtensionType::ExtendedMasterSecret)
@@ -2249,6 +2265,14 @@ pub(crate) trait HasServerExtensions {
     fn early_data_extension_offered(&self) -> bool {
         self.find_extension(ExtensionType::EarlyData)
             .is_some()
+    }
+
+    fn kemtls_extension(&self) -> Option<&[NamedGroup]> {
+        let ext = self.find_extension(ExtensionType::Kemtls)?;
+        match ext {
+            ServerExtension::Kemtls(kemalgs) => Some(kemalgs),
+            _ => None,
+        }
     }
 }
 

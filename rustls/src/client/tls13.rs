@@ -45,7 +45,7 @@ use crate::tls13::{
     construct_client_verify_message, construct_server_verify_message, Tls13CipherSuite,
 };
 use crate::verify::{self, DigitallySignedStruct};
-use crate::{compress, crypto, KeyLog};
+use crate::{compress, crypto, KeyLog, NamedGroup};
 
 // Extensions we expect in plaintext in the ServerHello.
 static ALLOWED_PLAINTEXT_EXTS: &[ExtensionType] = &[
@@ -505,6 +505,33 @@ fn validate_encrypted_extensions(
     Ok(())
 }
 
+fn negotiated_kemtls_group(
+    common: &mut CommonState,
+    config: &ClientConfig,
+    exts: &Vec<ServerExtension>,
+) -> Result<Option<NamedGroup>, Error> {
+    let Some(groups) = exts.kemtls_extension() else {
+        return Ok(None);
+    };
+
+    if groups.len() != 1 {
+        return Err(common.send_fatal_alert(
+            AlertDescription::IllegalParameter,
+            Error::General("server sent invalid KEMTLS negotiation".into()),
+        ));
+    }
+
+    let selected_group = groups[0];
+    if !config.kemtls_groups.contains(&selected_group) {
+        return Err(common.send_fatal_alert(
+            AlertDescription::IllegalParameter,
+            PeerMisbehaved::SelectedUnofferedKemtlsGroup,
+        ));
+    }
+
+    Ok(Some(selected_group))
+}
+
 fn get_server_pk_from_cert(cert: &CertificateDer<'_>) -> Result<Vec<u8>, Error> {
     match x509_parser::parse_x509_certificate(cert.as_ref()) {
         Ok((_, x509)) => {
@@ -566,6 +593,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
         hs::process_alpn_protocol(cx.common, &self.config, exts.alpn_protocol())?;
         hs::process_client_cert_type_extension(cx.common, &self.config, exts.client_cert_type())?;
         hs::process_server_cert_type_extension(cx.common, &self.config, exts.server_cert_type())?;
+        let selected_kemtls_group = negotiated_kemtls_group(cx.common, &self.config, exts)?;
 
         let ech_retry_configs = match (cx.data.ech_status, exts.server_ech_extension()) {
             // If we didn't offer ECH, or ECH was accepted, but the server sent an ECH encrypted
@@ -705,6 +733,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                         suite: self.suite,
                         transcript: self.transcript,
                         key_schedule: self.key_schedule,
+                        selected_kemtls_group,
                         ech_retry_configs,
                     })
                 } else {
@@ -715,6 +744,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                         suite: self.suite,
                         transcript: self.transcript,
                         key_schedule: self.key_schedule,
+                        selected_kemtls_group,
                         ech_retry_configs,
                     })
                 })
@@ -734,6 +764,7 @@ struct ExpectCertificateOrCompressedCertificateOrCertReq {
     suite: &'static Tls13CipherSuite,
     transcript: HandshakeHash,
     key_schedule: KeyScheduleHandshake,
+    selected_kemtls_group: Option<NamedGroup>,
     ech_retry_configs: Option<Vec<EchConfigPayload>>,
 }
 
@@ -763,6 +794,7 @@ impl State<ClientConnectionData> for ExpectCertificateOrCompressedCertificateOrC
                 key_schedule: self.key_schedule,
                 client_auth: None,
                 message_already_in_transcript: false,
+                selected_kemtls_group: self.selected_kemtls_group,
                 ech_retry_configs: self.ech_retry_configs,
             })
             .handle(cx, m),
@@ -781,6 +813,7 @@ impl State<ClientConnectionData> for ExpectCertificateOrCompressedCertificateOrC
                 transcript: self.transcript,
                 key_schedule: self.key_schedule,
                 client_auth: None,
+                selected_kemtls_group: self.selected_kemtls_group,
                 ech_retry_configs: self.ech_retry_configs,
             })
             .handle(cx, m),
@@ -799,6 +832,7 @@ impl State<ClientConnectionData> for ExpectCertificateOrCompressedCertificateOrC
                 transcript: self.transcript,
                 key_schedule: self.key_schedule,
                 offered_cert_compression: true,
+                selected_kemtls_group: self.selected_kemtls_group,
                 ech_retry_configs: self.ech_retry_configs,
             })
             .handle(cx, m),
@@ -827,6 +861,7 @@ struct ExpectCertificateOrCompressedCertificate {
     transcript: HandshakeHash,
     key_schedule: KeyScheduleHandshake,
     client_auth: Option<ClientAuthDetails>,
+    selected_kemtls_group: Option<NamedGroup>,
     ech_retry_configs: Option<Vec<EchConfigPayload>>,
 }
 
@@ -856,6 +891,7 @@ impl State<ClientConnectionData> for ExpectCertificateOrCompressedCertificate {
                 key_schedule: self.key_schedule,
                 client_auth: self.client_auth,
                 message_already_in_transcript: false,
+                selected_kemtls_group: self.selected_kemtls_group,
                 ech_retry_configs: self.ech_retry_configs,
             })
             .handle(cx, m),
@@ -874,6 +910,7 @@ impl State<ClientConnectionData> for ExpectCertificateOrCompressedCertificate {
                 transcript: self.transcript,
                 key_schedule: self.key_schedule,
                 client_auth: self.client_auth,
+                selected_kemtls_group: self.selected_kemtls_group,
                 ech_retry_configs: self.ech_retry_configs,
             })
             .handle(cx, m),
@@ -900,6 +937,7 @@ struct ExpectCertificateOrCertReq {
     suite: &'static Tls13CipherSuite,
     transcript: HandshakeHash,
     key_schedule: KeyScheduleHandshake,
+    selected_kemtls_group: Option<NamedGroup>,
     ech_retry_configs: Option<Vec<EchConfigPayload>>,
 }
 
@@ -929,6 +967,7 @@ impl State<ClientConnectionData> for ExpectCertificateOrCertReq {
                 key_schedule: self.key_schedule,
                 client_auth: None,
                 message_already_in_transcript: false,
+                selected_kemtls_group: self.selected_kemtls_group,
                 ech_retry_configs: self.ech_retry_configs,
             })
             .handle(cx, m),
@@ -947,6 +986,7 @@ impl State<ClientConnectionData> for ExpectCertificateOrCertReq {
                 transcript: self.transcript,
                 key_schedule: self.key_schedule,
                 offered_cert_compression: false,
+                selected_kemtls_group: self.selected_kemtls_group,
                 ech_retry_configs: self.ech_retry_configs,
             })
             .handle(cx, m),
@@ -977,6 +1017,7 @@ struct ExpectCertificateRequest {
     transcript: HandshakeHash,
     key_schedule: KeyScheduleHandshake,
     offered_cert_compression: bool,
+    selected_kemtls_group: Option<NamedGroup>,
     ech_retry_configs: Option<Vec<EchConfigPayload>>,
 }
 
@@ -1054,6 +1095,7 @@ impl State<ClientConnectionData> for ExpectCertificateRequest {
                 transcript: self.transcript,
                 key_schedule: self.key_schedule,
                 client_auth: Some(client_auth),
+                selected_kemtls_group: self.selected_kemtls_group,
                 ech_retry_configs: self.ech_retry_configs,
             })
         } else {
@@ -1066,6 +1108,7 @@ impl State<ClientConnectionData> for ExpectCertificateRequest {
                 key_schedule: self.key_schedule,
                 client_auth: Some(client_auth),
                 message_already_in_transcript: false,
+                selected_kemtls_group: self.selected_kemtls_group,
                 ech_retry_configs: self.ech_retry_configs,
             })
         })
@@ -1084,6 +1127,7 @@ struct ExpectCompressedCertificate {
     transcript: HandshakeHash,
     key_schedule: KeyScheduleHandshake,
     client_auth: Option<ClientAuthDetails>,
+    selected_kemtls_group: Option<NamedGroup>,
     ech_retry_configs: Option<Vec<EchConfigPayload>>,
 }
 
@@ -1170,6 +1214,7 @@ impl State<ClientConnectionData> for ExpectCompressedCertificate {
             key_schedule: self.key_schedule,
             client_auth: self.client_auth,
             message_already_in_transcript: true,
+            selected_kemtls_group: self.selected_kemtls_group,
             ech_retry_configs: self.ech_retry_configs,
         })
         .handle(cx, m)
@@ -1189,6 +1234,7 @@ struct ExpectCertificate {
     key_schedule: KeyScheduleHandshake,
     client_auth: Option<ClientAuthDetails>,
     message_already_in_transcript: bool,
+    selected_kemtls_group: Option<NamedGroup>,
     ech_retry_configs: Option<Vec<EchConfigPayload>>,
 }
 
@@ -1234,160 +1280,8 @@ impl State<ClientConnectionData> for ExpectCertificate {
             end_entity_ocsp,
         );
 
-        if self.config.verifier.authkem() {
-            let (leaf_cert, _ca_certs) = server_cert
-                .cert_chain
-                .split_first()
-                .ok_or(Error::NoCertificatesPresented)?;
-            debug!("Client: received server Certificate, about to encapsulate");
-
-            let server_pk = get_server_pk_from_cert(leaf_cert)?; //get server public key from certificate
-
-            // encapsulate to server public key
-            let (ct, server_ss) = self
-                .config
-                .verifier
-                .encapsulate(&server_pk)?;
-            debug!(
-                "CLIENT ENCAPSULATION RESULT: ct={} bytes, ss={} bytes",
-                ct.clone().len(),
-                server_ss.len()
-            );
-
-            let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
-
-            flight.add(HandshakeMessagePayload {
-                typ: HandshakeType::KemEncapsulation,
-                payload: HandshakePayload::KemEncapsulation(KemEncapsulationPayload {
-                    certificate_req_context: PayloadU8::new(Vec::new()),
-                    ciphertext: PayloadU16::new(ct),
-                }),
-            });
-            flight.finish(cx.common);
-
-            let auth_handshake_key_schedule = self
-                .key_schedule
-                .into_authenticated_handshake(
-                    &server_ss,
-                    self.transcript.current_hash(),
-                    &*self.config.key_log,
-                    &self.randoms.client,
-                    cx.common,
-                );
-
-            if let Some(client_auth) = &self.client_auth {
-                debug!("Client: authentication requested, sending certificate");
-                let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
-                match client_auth {
-                    ClientAuthDetails::Empty { auth_context_tls13 } => {
-                        emit_certificate_tls13(&mut flight, None, auth_context_tls13.clone());
-                        debug!("Client sent empty certificate, proceeding without client authentication");
-                        flight.finish(cx.common);
-
-                        let mut finished_flight = HandshakeFlightTls13::new(&mut self.transcript);
-
-                        let key_schedule =
-                            auth_handshake_key_schedule.into_main_secret(None);
-                        let verify_data = key_schedule.sign_client_finish(
-                            &finished_flight
-                                .transcript
-                                .current_hash(),
-                        );
-                        emit_finished_tls13(&mut finished_flight, &verify_data);
-                        debug!("Client: sending Finished message");
-                        finished_flight.finish(cx.common);
-                        cx.common.check_aligned_handshake()?;
-
-                        let key_schedule_traffic = key_schedule.into_client_traffic(
-                            self.transcript.current_hash(),
-                            &*self.config.key_log,
-                            &self.randoms.client,
-                            Side::Client,
-                            cx.common,
-                        );
-                        cx.common
-                            .start_outgoing_traffic(&mut cx.sendable_plaintext);
-                        Ok(Box::new(ExpectKemtlsFinished {
-                            config: self.config,
-                            server_name: self.server_name,
-                            suite: self.suite,
-                            transcript: self.transcript,
-                            key_schedule: key_schedule_traffic,
-                            randoms: self.randoms,
-                            cert_verified: verify::ServerCertVerified::assertion(),
-                        }))
-                    }
-                    ClientAuthDetails::Verify {
-                        certkey,
-                        auth_context_tls13,
-                        compressor,
-                        ..
-                    } => {
-                        if let Some(compressor) = compressor {
-                            emit_compressed_certificate_tls13(
-                                &mut flight,
-                                &certkey,
-                                auth_context_tls13.clone(),
-                                compressor.clone(),
-                                &self.config,
-                            );
-                        } else {
-                            emit_certificate_tls13(
-                                &mut flight,
-                                Some(&certkey),
-                                auth_context_tls13.clone(),
-                            );
-                        }
-                        debug!("Client: Certificate sent");
-                        flight.finish(cx.common);
-
-                        Ok(Box::new(ExpectKemtlsEncapsulation {
-                            config: self.config,
-                            server_name: self.server_name,
-                            randoms: self.randoms,
-                            suite: self.suite,
-                            transcript: self.transcript,
-                            auth_key_schedule: auth_handshake_key_schedule,
-                            client_auth: self.client_auth,
-                            cert_verified: verify::ServerCertVerified::assertion(),
-                        }))
-                    }
-                }
-            } else {
-                debug!("Client: sending Finished message");
-                let mut finished_flight = HandshakeFlightTls13::new(&mut self.transcript);
-
-                let key_schedule = auth_handshake_key_schedule.into_main_secret(None);
-                let verify_data = key_schedule.sign_client_finish(
-                    &finished_flight
-                        .transcript
-                        .current_hash(),
-                );
-                emit_finished_tls13(&mut finished_flight, &verify_data);
-                finished_flight.finish(cx.common);
-                cx.common.check_aligned_handshake()?;
-
-                let key_schedule_traffic = key_schedule.into_client_traffic(
-                    self.transcript.current_hash(),
-                    &*self.config.key_log,
-                    &self.randoms.client,
-                    Side::Client,
-                    cx.common,
-                );
-                cx.common
-                    .start_outgoing_traffic(&mut cx.sendable_plaintext);
-                Ok(Box::new(ExpectKemtlsFinished {
-                    config: self.config,
-                    server_name: self.server_name,
-                    suite: self.suite,
-                    transcript: self.transcript,
-                    key_schedule: key_schedule_traffic,
-                    randoms: self.randoms,
-                    cert_verified: verify::ServerCertVerified::assertion(),
-                }))
-            }
-        } else {
-            Ok(Box::new(ExpectCertificateVerify {
+        if self.selected_kemtls_group.is_none() {
+            return Ok(Box::new(ExpectCertificateVerify {
                 config: self.config,
                 server_name: self.server_name,
                 randoms: self.randoms,
@@ -1397,6 +1291,158 @@ impl State<ClientConnectionData> for ExpectCertificate {
                 server_cert,
                 client_auth: self.client_auth,
                 ech_retry_configs: self.ech_retry_configs,
+            }))
+        }
+
+        let (leaf_cert, _ca_certs) = server_cert
+            .cert_chain
+            .split_first()
+            .ok_or(Error::NoCertificatesPresented)?;
+        debug!("Client: received server Certificate, about to encapsulate");
+
+        let server_pk = get_server_pk_from_cert(leaf_cert)?; //get server public key from certificate
+
+        // encapsulate to server public key
+        let (ct, server_ss) = self
+            .config
+            .verifier
+            .encapsulate(self.selected_kemtls_group, &server_pk)?;
+        debug!(
+            "CLIENT ENCAPSULATION RESULT: ct={} bytes, ss={} bytes",
+            ct.clone().len(),
+            server_ss.len()
+        );
+
+        let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
+
+        flight.add(HandshakeMessagePayload {
+            typ: HandshakeType::KemEncapsulation,
+            payload: HandshakePayload::KemEncapsulation(KemEncapsulationPayload {
+                certificate_req_context: PayloadU8::new(Vec::new()),
+                ciphertext: PayloadU16::new(ct),
+            }),
+        });
+        flight.finish(cx.common);
+
+        let auth_handshake_key_schedule = self
+            .key_schedule
+            .into_authenticated_handshake(
+                &server_ss,
+                self.transcript.current_hash(),
+                &*self.config.key_log,
+                &self.randoms.client,
+                cx.common,
+            );
+
+        if let Some(client_auth) = &self.client_auth {
+            debug!("Client: authentication requested, sending certificate");
+            let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
+            match client_auth {
+                ClientAuthDetails::Empty { auth_context_tls13 } => {
+                    emit_certificate_tls13(&mut flight, None, auth_context_tls13.clone());
+                    debug!("Client sent empty certificate, proceeding without client authentication");
+                    flight.finish(cx.common);
+
+                    let mut finished_flight = HandshakeFlightTls13::new(&mut self.transcript);
+
+                    let key_schedule =
+                        auth_handshake_key_schedule.into_main_secret(None);
+                    let verify_data = key_schedule.sign_client_finish(
+                        &finished_flight
+                            .transcript
+                            .current_hash(),
+                    );
+                    emit_finished_tls13(&mut finished_flight, &verify_data);
+                    debug!("Client: sending Finished message");
+                    finished_flight.finish(cx.common);
+                    cx.common.check_aligned_handshake()?;
+
+                    let key_schedule_traffic = key_schedule.into_client_traffic(
+                        self.transcript.current_hash(),
+                        &*self.config.key_log,
+                        &self.randoms.client,
+                        Side::Client,
+                        cx.common,
+                    );
+                    cx.common
+                        .start_outgoing_traffic(&mut cx.sendable_plaintext);
+                    Ok(Box::new(ExpectKemtlsFinished {
+                        config: self.config,
+                        server_name: self.server_name,
+                        suite: self.suite,
+                        transcript: self.transcript,
+                        key_schedule: key_schedule_traffic,
+                        randoms: self.randoms,
+                        cert_verified: verify::ServerCertVerified::assertion(),
+                    }))
+                }
+                ClientAuthDetails::Verify {
+                    certkey,
+                    auth_context_tls13,
+                    compressor,
+                    ..
+                } => {
+                    if let Some(compressor) = compressor {
+                        emit_compressed_certificate_tls13(
+                            &mut flight,
+                            &certkey,
+                            auth_context_tls13.clone(),
+                            compressor.clone(),
+                            &self.config,
+                        );
+                    } else {
+                        emit_certificate_tls13(
+                            &mut flight,
+                            Some(&certkey),
+                            auth_context_tls13.clone(),
+                        );
+                    }
+                    debug!("Client: Certificate sent");
+                    flight.finish(cx.common);
+
+                    Ok(Box::new(ExpectKemtlsEncapsulation {
+                        config: self.config,
+                        server_name: self.server_name,
+                        randoms: self.randoms,
+                        suite: self.suite,
+                        transcript: self.transcript,
+                        auth_key_schedule: auth_handshake_key_schedule,
+                        client_auth: self.client_auth,
+                        cert_verified: verify::ServerCertVerified::assertion(),
+                    }))
+                }
+            }
+        } else {
+            debug!("Client: sending Finished message");
+            let mut finished_flight = HandshakeFlightTls13::new(&mut self.transcript);
+
+            let key_schedule = auth_handshake_key_schedule.into_main_secret(None);
+            let verify_data = key_schedule.sign_client_finish(
+                &finished_flight
+                    .transcript
+                    .current_hash(),
+            );
+            emit_finished_tls13(&mut finished_flight, &verify_data);
+            finished_flight.finish(cx.common);
+            cx.common.check_aligned_handshake()?;
+
+            let key_schedule_traffic = key_schedule.into_client_traffic(
+                self.transcript.current_hash(),
+                &*self.config.key_log,
+                &self.randoms.client,
+                Side::Client,
+                cx.common,
+            );
+            cx.common
+                .start_outgoing_traffic(&mut cx.sendable_plaintext);
+            Ok(Box::new(ExpectKemtlsFinished {
+                config: self.config,
+                server_name: self.server_name,
+                suite: self.suite,
+                transcript: self.transcript,
+                key_schedule: key_schedule_traffic,
+                randoms: self.randoms,
+                cert_verified: verify::ServerCertVerified::assertion(),
             }))
         }
     }

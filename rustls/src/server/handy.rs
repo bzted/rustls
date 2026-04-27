@@ -3,7 +3,7 @@ use core::fmt::Debug;
 
 use crate::server::ClientHello;
 use crate::sync::Arc;
-use crate::{server, sign};
+use crate::{NamedGroup, server, sign};
 
 /// Something which never stores sessions.
 #[derive(Debug)]
@@ -181,7 +181,7 @@ impl AlwaysResolvesServerRawPublicKeys {
 }
 
 impl server::ResolvesServerCert for AlwaysResolvesServerRawPublicKeys {
-    fn resolve(&self, _client_hello: ClientHello<'_>) -> Option<Arc<sign::CertifiedKey>> {
+    fn resolve(&self, _client_hello: ClientHello<'_>, _selected_kemtls_group: Option<NamedGroup>) -> Option<Arc<sign::CertifiedKey>> {
         Some(Arc::clone(&self.0))
     }
 
@@ -202,7 +202,7 @@ mod sni_resolver {
     use crate::server::ClientHello;
     use crate::sync::Arc;
     use crate::webpki::{ParsedCertificate, verify_server_name};
-    use crate::{server, sign};
+    use crate::{NamedGroup, server, sign};
 
     /// Something that resolves do different cert chains/keys based
     /// on client-supplied server name (via SNI).
@@ -254,7 +254,7 @@ mod sni_resolver {
     }
 
     impl server::ResolvesServerCert for ResolvesServerCertUsingSni {
-        fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<sign::CertifiedKey>> {
+        fn resolve(&self, client_hello: ClientHello<'_>, _selected_kemtls_group: Option<NamedGroup>) -> Option<Arc<sign::CertifiedKey>> {
             if let Some(name) = client_hello.server_name() {
                 self.by_name.get(name).cloned()
             } else {
@@ -282,7 +282,7 @@ mod sni_resolver {
                         client_cert_types: None,
                         cipher_suites: &[],
                         certificate_authorities: None,
-                    })
+                    }, None)
                     .is_none()
             );
         }
@@ -303,7 +303,7 @@ mod sni_resolver {
                         client_cert_types: None,
                         cipher_suites: &[],
                         certificate_authorities: None,
-                    })
+                    }, None)
                     .is_none()
             );
         }
