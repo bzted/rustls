@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 const BUFFER_SIZE: usize = 4096;
 const APP_FRAME_HEADER_LEN: usize = 4;
 const TIMEOUT_SECS: u64 = 1;
+const COMPLETED_CLIENT_TIMEOUT_SECS: u64 = 5;
 const HTTP_RESPONSE: &[u8] = b"Hello from TLS Server!";
 
 #[derive(Debug, Clone)]
@@ -523,7 +524,6 @@ impl ClientState {
                 expected_request_len,
                 last_seen,
             } => {
-                let mut finished = false;
                 *last_seen = Instant::now();
                 let mut slice = packet;
                 if let Err(e) = conn.read_tls(&mut slice) {
@@ -551,26 +551,14 @@ impl ClientState {
                         }
                     }
 
-                    if expected_request_len.is_none() && request_buffer.len() >= APP_FRAME_HEADER_LEN {
-                        let frame_len = u32::from_be_bytes(
-                            request_buffer[..APP_FRAME_HEADER_LEN]
-                                .try_into()
-                                .expect("frame header has fixed size"),
-                        ) as usize;
-                        *expected_request_len = Some(frame_len);
-                    }
-
-                    if !*response_sent
-                        && request_complete(request_buffer, *expected_request_len)
-                    {
+                    while take_complete_request(request_buffer, expected_request_len) {
                         send_zero_payload(conn, payload_size)?;
                         *response_sent = true;
-                        finished = true;
                     }
                 }
 
                 Self::write_pending(conn, socket, addr)?;
-                return Ok(finished);
+                return Ok(false);
             }
         }
         Ok(false)
@@ -614,11 +602,40 @@ impl ClientState {
     }
 }
 
-fn request_complete(buffer: &[u8], expected_len: Option<usize>) -> bool {
-    matches!(
-        expected_len,
-        Some(frame_len) if buffer.len() >= APP_FRAME_HEADER_LEN + frame_len
-    )
+fn take_complete_request(buffer: &mut Vec<u8>, expected_len: &mut Option<usize>) -> bool {
+    if expected_len.is_none() && buffer.len() >= APP_FRAME_HEADER_LEN {
+        let frame_len = u32::from_be_bytes(
+            buffer[..APP_FRAME_HEADER_LEN]
+                .try_into()
+                .expect("frame header has fixed size"),
+        ) as usize;
+        *expected_len = Some(frame_len);
+    }
+
+    let frame_len = match *expected_len {
+        Some(frame_len) => frame_len,
+        None => return false,
+    };
+    let total_len = APP_FRAME_HEADER_LEN + frame_len;
+    if buffer.len() < total_len {
+        return false;
+    }
+
+    buffer.drain(..total_len);
+    *expected_len = None;
+    true
+}
+
+fn looks_like_dtls_client_hello(packet: &[u8]) -> bool {
+    const DTLS_RECORD_HEADER_LEN: usize = 13;
+    const CONTENT_TYPE_HANDSHAKE: u8 = 22;
+    const HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 1;
+
+    packet.len() > DTLS_RECORD_HEADER_LEN
+        && packet[0] == CONTENT_TYPE_HANDSHAKE
+        && packet[3] == 0
+        && packet[4] == 0
+        && packet[DTLS_RECORD_HEADER_LEN] == HANDSHAKE_TYPE_CLIENT_HELLO
 }
 
 fn build_zero_payload_frame(size: usize) -> Vec<u8> {
@@ -656,6 +673,17 @@ fn run_dtls_server(
                 Ok((len, addr)) => {
                     let packet = &buffer[..len];
 
+                    if matches!(
+                        clients.get(&addr),
+                        Some(ClientState::Connected {
+                            response_sent: true,
+                            ..
+                        })
+                    ) && looks_like_dtls_client_hello(packet)
+                    {
+                        clients.remove(&addr);
+                    }
+
                     let state = clients.entry(addr).or_insert_with(|| {
                         println!("Nueva sesión: {}", addr);
                         ClientState::Handshaking {
@@ -685,11 +713,20 @@ fn run_dtls_server(
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     let now = Instant::now();
                     clients.retain(|addr, state| {
-                        let last = match state {
-                            ClientState::Handshaking { last_seen, .. } => last_seen,
-                            ClientState::Connected { last_seen, .. } => last_seen,
+                        let (last, timeout) = match state {
+                            ClientState::Handshaking { last_seen, .. } => {
+                                (last_seen, Duration::from_secs(10))
+                            }
+                            ClientState::Connected {
+                                response_sent: true,
+                                last_seen,
+                                ..
+                            } => (last_seen, Duration::from_secs(COMPLETED_CLIENT_TIMEOUT_SECS)),
+                            ClientState::Connected { last_seen, .. } => {
+                                (last_seen, Duration::from_secs(10))
+                            }
                         };
-                        if now.duration_since(*last) > Duration::from_secs(10) {
+                        if now.duration_since(*last) > timeout {
                             println!("Sesión expirada: {}", addr);
                             return false;
                         }
