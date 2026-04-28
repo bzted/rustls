@@ -17,6 +17,8 @@ use std::path::PathBuf;
 const BUFFER_SIZE: usize = 4096;
 const APP_FRAME_HEADER_LEN: usize = 4;
 const TIMEOUT_SECS: u64 = 1;
+const APP_RESPONSE_TIMEOUT_SECS: u64 = 1;
+const MAX_APP_RETRIES: usize = 3;
 
 #[derive(Debug, Clone)]
 struct ClientArgs {
@@ -33,6 +35,8 @@ struct ClientArgs {
     iterations: usize,
     warmup: usize,
     csv: Option<String>,
+    incremental_ports: bool,
+    base_local_port: u16,
 }
 
 impl Default for ClientArgs {
@@ -51,12 +55,14 @@ impl Default for ClientArgs {
             iterations: 1,
             warmup: 5,
             csv: None,
+            incremental_ports: false,
+            base_local_port: 50000,
         }
     }
 }
 
 fn print_usage(program: &str) {
-    eprintln!(
+    println!(
         r"Usage: {program} [options]
          Options:
            -g, --group <NAME>              KX group to use
@@ -72,6 +78,8 @@ fn print_usage(program: &str) {
            -n, --iterations <N>            Iterations to bench [default: 1]
                --warmup <N>                Warmup iterations [default: 5]
                --csv <PATH>                CSV file for results
+               --incremental-ports         Increment local ports for measurements
+               --base-local-port <PORT>    Initial local port (default: 50000)
            -h, --help                      Show this help message"
     );
 }
@@ -158,6 +166,13 @@ fn parse_args() -> Result<ClientArgs, String> {
             "--csv" => {
                 args.csv = Some(take_value(&mut it, &arg)?);
             }
+            "--incremental-ports" => {
+                args.incremental_ports = true;
+            }
+            "--base-local-port" => {
+                let v = take_value(&mut it, &arg)?;
+                args.base_local_port = parse_u16(&v, &arg)?;
+            }
             _ => {
                 if let Some(value) = arg.strip_prefix("--group=") {
                     args.group = Some(value.to_string());
@@ -183,6 +198,8 @@ fn parse_args() -> Result<ClientArgs, String> {
                     args.warmup = parse_usize(value, "--warmup")?;
                 } else if let Some(value) = arg.strip_prefix("--csv=") {
                     args.csv = Some(value.to_string());
+                } else if let Some(value) = arg.strip_prefix("--base-local-port=") {
+                    args.base_local_port = parse_u16(value, "--base-local-port")?;
                 } else {
                     return Err(format!("unknown argument: {arg}"));
                 }
@@ -218,13 +235,33 @@ fn select_kx_group(crypto_provider: &mut CryptoProvider, group: &str) {
     }
 }
 
-fn setup_udp_socket(server_addr: &str) -> Result<UdpSocket, std::io::Error> {
-    let socket = UdpSocket::bind("0.0.0.0:0")?;
-    socket.set_nonblocking(true)?;
+fn setup_udp_socket(
+    server_addr: &str,
+    local_port: Option<u16>,
+) -> Result<UdpSocket, std::io::Error> {
+    let bind_addr = match local_port {
+        Some(port) => format!("0.0.0.0:{port}"),
+        None => "0.0.0.0:0".to_string(),
+    };
+
+    let socket = UdpSocket::bind(bind_addr)?;
     socket.connect(server_addr)?;
     socket.set_read_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
     socket.set_write_timeout(Some(Duration::from_secs(TIMEOUT_SECS)))?;
     Ok(socket)
+}
+
+fn is_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
+fn is_timeout_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .map(is_error)
+        .unwrap_or(false)
 }
 
 fn send_dtls_datagram(
@@ -245,30 +282,45 @@ fn send_dtls_datagram(
     Ok(())
 }
 
+fn receive_dtls_datagram(
+    socket: &UdpSocket,
+    conn: &mut ClientConnection,
+    buffer: &mut [u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    match socket.recv(buffer) {
+        Ok(n) => {
+            let mut slice = &buffer[..n];
+            while !slice.is_empty() {
+                conn.read_tls(&mut slice)?;
+            }
+            conn.process_new_packets()?;
+        }
+        Err(e) if is_error(&e) => {
+            conn.process_new_packets()?;
+        }
+        Err(e) => return Err(Box::new(e)),
+    }
+
+    Ok(())
+}
+
 fn perform_dtls_handshake(
     socket: &UdpSocket,
     conn: &mut ClientConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut in_buf = [0u8; BUFFER_SIZE];
 
-    while conn.is_handshaking() {
+    loop {
         send_dtls_datagram(socket, conn)?;
 
-        match socket.recv(&mut in_buf) {
-            Ok(n) => {
-                let mut slice = &in_buf[..n];
-                while !slice.is_empty() {
-                    conn.read_tls(&mut slice)?;
-                }
-                conn.process_new_packets()?;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                conn.process_new_packets()?;
-            }
-            Err(e) => return Err(Box::new(e)),
+        if !conn.is_handshaking() {
+            debug!("DTLS handshake completed");
+            break;
         }
+
+        receive_dtls_datagram(socket, conn, &mut in_buf)?;
     }
-    debug!("DTLS handshake completed");
+
     Ok(())
 }
 
@@ -311,6 +363,7 @@ fn try_extract_frame(buffer: &[u8]) -> Option<Vec<u8>> {
 fn receive_http_response(
     socket: &UdpSocket,
     conn: &mut ClientConnection,
+    deadline: Instant,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut in_buf = [0u8; BUFFER_SIZE];
     let mut framed_plaintext = Vec::new();
@@ -331,20 +384,51 @@ fn receive_http_response(
             return Ok(frame);
         }
 
-        match socket.recv(&mut in_buf) {
-            Ok(n) => {
-                let mut slice = &in_buf[..n];
-                while !slice.is_empty() {
-                    conn.read_tls(&mut slice)?;
-                }
-                conn.process_new_packets()?;
+        if Instant::now() >= deadline {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out waiting for application response",
+            )));
+        }
+
+        receive_dtls_datagram(socket, conn, &mut in_buf)?;
+    }
+}
+
+fn exchange_application_data(
+    socket: &UdpSocket,
+    conn: &mut ClientConnection,
+    payload_size: usize,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut last_err: Option<Box<dyn std::error::Error>> = None;
+
+    for attempt in 0..MAX_APP_RETRIES {
+        send_http_request(socket, conn, payload_size)?;
+
+        match receive_http_response(
+            socket,
+            conn,
+            Instant::now() + Duration::from_secs(APP_RESPONSE_TIMEOUT_SECS),
+        ) {
+            Ok(response) => return Ok(response),
+            Err(e) if attempt + 1 < MAX_APP_RETRIES && is_timeout_error(e.as_ref()) => {
+                debug!(
+                    "application response timed out, retrying request ({}/{})",
+                    attempt + 2,
+                    MAX_APP_RETRIES
+                );
+                last_err = Some(e);
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                conn.process_new_packets()?;
-            }
-            Err(e) => return Err(Box::new(e)),
+            Err(e) => return Err(e),
         }
     }
+
+    Err(last_err.unwrap_or_else(|| {
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "application request retries exhausted",
+        ))
+    }))
 }
 
 fn run_dtls_client(
@@ -353,13 +437,13 @@ fn run_dtls_client(
     server_addr: &str,
     payload_size: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let socket = setup_udp_socket(server_addr)?;
+    let socket = setup_udp_socket(server_addr, Some(0 as u16))?;
     let mut conn = ClientConnection::new_dtls(Arc::new(client_config), server_name)?;
 
     perform_dtls_handshake(&socket, &mut conn)?;
-    send_http_request(&socket, &mut conn, payload_size)?;
 
-    let response = receive_http_response(&socket, &mut conn)?;
+    println!("Waiting for response...");
+    let response = exchange_application_data(&socket, &mut conn, payload_size)?;
 
     println!("Response received:");
     println!("{:?}", String::from_utf8_lossy(&response));
@@ -548,7 +632,10 @@ fn compute_summary_stats(rows: &[BenchRow]) -> Option<SummaryStats> {
         .filter(|r| {
             r.error
                 .as_deref()
-                .map(|e| e.to_ascii_lowercase().contains("timeout"))
+                .map(|e| {
+                    let e = e.to_ascii_lowercase();
+                    e.contains("timeout") || e.contains("timed out")
+                })
                 .unwrap_or(false)
         })
         .count();
@@ -710,9 +797,10 @@ fn run_one_dtls_connection(
     server_name: rustls::pki_types::ServerName<'static>,
     server_addr: &str,
     payload_size: usize,
+    local_port: Option<u16>,
     setup_ms: Option<f64>,
 ) -> BenchRow {
-    let socket = match setup_udp_socket(server_addr) {
+    let socket = match setup_udp_socket(server_addr, local_port) {
         Ok(s) => s,
         Err(e) => {
             return BenchRow {
@@ -756,18 +844,7 @@ fn run_one_dtls_connection(
     let t1 = Instant::now();
     let handshake_ms = t1.duration_since(t0).as_secs_f64() * 1000.0;
 
-    if let Err(e) = send_http_request(&socket, &mut conn, payload_size) {
-        return BenchRow {
-            iter,
-            status: "ERROR".to_string(),
-            setup_ms,
-            handshake_ms: Some(handshake_ms),
-            transaction_ms: None,
-            error: Some(format!("send_app: {}", e)),
-        };
-    }
-
-    match receive_http_response(&socket, &mut conn) {
+    match exchange_application_data(&socket, &mut conn, payload_size) {
         Ok(_response) => {
             let t2 = Instant::now();
             let transaction_ms = t2.duration_since(t0).as_secs_f64() * 1000.0;
@@ -787,7 +864,7 @@ fn run_one_dtls_connection(
             setup_ms,
             handshake_ms: Some(handshake_ms),
             transaction_ms: None,
-            error: Some(format!("recv_app: {}", e)),
+            error: Some(format!("app_exchange: {}", e)),
         },
     }
 }
@@ -803,23 +880,37 @@ fn run_dtls_kemtls_benchmark(
     let shared_config = Arc::new(client_config);
 
     for i in 0..args.warmup {
+        let local_port = if args.incremental_ports {
+            Some(args.base_local_port.saturating_add(i as u16))
+        } else {
+            None
+        };
+
         let _ = run_one_dtls_connection(
             i,
             shared_config.clone(),
             server_name.clone(),
             server_addr,
             args.payload_size,
+            local_port,
             None,
         );
     }
 
     for i in 1..=args.iterations {
+        let local_port = if args.incremental_ports {
+            Some(args.base_local_port.saturating_add((args.warmup + i) as u16))
+        } else {
+            None
+        };
+
         let row = run_one_dtls_connection(
             i,
             shared_config.clone(),
             server_name.clone(),
             server_addr,
             args.payload_size,
+            local_port,
             None,
         );
 
