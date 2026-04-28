@@ -523,6 +523,7 @@ impl ClientState {
                 expected_request_len,
                 last_seen,
             } => {
+                let mut finished = false;
                 *last_seen = Instant::now();
                 let mut slice = packet;
                 if let Err(e) = conn.read_tls(&mut slice) {
@@ -564,10 +565,12 @@ impl ClientState {
                     {
                         send_zero_payload(conn, payload_size)?;
                         *response_sent = true;
+                        finished = true;
                     }
                 }
 
                 Self::write_pending(conn, socket, addr)?;
+                return Ok(finished);
             }
         }
         Ok(false)
