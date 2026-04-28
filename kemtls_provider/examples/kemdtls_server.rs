@@ -359,6 +359,7 @@ fn create_server_config(
         }
         false => ServerConfig::builder_with_provider(crypto_provider.into())
             .with_safe_default_protocol_versions()?
+            .with_kemtls_groups(auth_groups.clone())
             .with_no_client_auth()
             .with_cert_resolver(resolver),
     };

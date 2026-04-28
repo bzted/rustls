@@ -863,6 +863,10 @@ pub(super) fn process_client_cert_type_extension(
     config: &ClientConfig,
     client_cert_extension: Option<&CertificateType>,
 ) -> Result<Option<(ExtensionType, CertificateType)>, Error> {
+    if client_cert_extension.is_none() {
+        return Ok(None);
+    }
+
     if !config
         .client_auth_cert_resolver
         .has_certs()
