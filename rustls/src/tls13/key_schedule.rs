@@ -897,6 +897,63 @@ impl KeyScheduleAuthenticatedHandshake {
 
         KeyScheduleMainSecret { ks: self.ks }
     }
+
+    pub(crate) fn into_client_authenticated_handshake(
+        mut self,
+        client_ss: &[u8],
+        hs_hash: &hash::Output,
+        key_log: &dyn KeyLog,
+        client_random: &[u8; 32],
+        common: &mut CommonState,
+    ) -> KeyScheduleMainSecret {
+        trace!("Client auth requested");
+        trace!("Client shared secret length: {}", client_ss.len());
+        trace!(
+            "Client shared secret first bytes: {:02x?}",
+            &client_ss[..std::cmp::min(8, client_ss.len())]
+        );
+        self.ks.input_secret(client_ss);
+
+        let client_secret = self.ks.derive_logged_secret(
+            SecretKind::ClientHandshakeAuthenticatedTrafficSecret,
+            hs_hash.as_ref(),
+            key_log,
+            client_random,
+        );
+        let server_secret = self.ks.derive_logged_secret(
+            SecretKind::ServerHandshakeAuthenticatedTrafficSecret,
+            hs_hash.as_ref(),
+            key_log,
+            client_random,
+        );
+
+        #[cfg(feature = "dtls13")]
+        {
+            common
+                .record_layer
+                .advance_write_epoch();
+            debug_assert_eq!(common.record_layer.write_epoch(), 4);
+            common.record_layer.advance_read_epoch();
+            debug_assert_eq!(common.record_layer.read_epoch(), 4);
+        }
+
+        match common.side {
+            Side::Client => {
+                self.ks
+                    .set_encrypter(&client_secret, common);
+                self.ks
+                    .set_decrypter(&server_secret, common);
+            }
+            Side::Server => {
+                self.ks
+                    .set_encrypter(&server_secret, common);
+                self.ks
+                    .set_decrypter(&client_secret, common);
+            }
+        }
+
+        KeyScheduleMainSecret { ks: self.ks }
+    }
 }
 
 pub(crate) struct KeyScheduleMainSecret {
@@ -925,12 +982,20 @@ impl KeyScheduleMainSecret {
         );
 
         match side {
-            Side::Client => self
-                .ks
-                .set_encrypter(&current_client_traffic_secret, common),
-            Side::Server => self
-                .ks
-                .set_decrypter(&current_client_traffic_secret, common),
+            Side::Client => {
+                #[cfg(feature = "dtls13")]
+                common
+                    .record_layer
+                    .advance_write_epoch();
+                self.ks
+                    .set_encrypter(&current_client_traffic_secret, common);
+            }
+            Side::Server => {
+                #[cfg(feature = "dtls13")]
+                common.record_layer.advance_read_epoch();
+                self.ks
+                    .set_decrypter(&current_client_traffic_secret, common);
+            }
         };
 
         KeyScheduleClientTraffic {
@@ -966,22 +1031,18 @@ impl KeyScheduleClientTraffic {
             client_random,
         );
 
-        #[cfg(feature = "dtls13")]
-        {
-            common
-                .record_layer
-                .advance_write_epoch();
-            common.record_layer.advance_read_epoch();
-            assert_eq!(common.record_layer.write_epoch(), 4);
-            assert_eq!(common.record_layer.read_epoch(), 4);
-        }
-
         match side {
             Side::Client => {
+                #[cfg(feature = "dtls13")]
+                common.record_layer.advance_read_epoch();
                 self.ks
                     .set_decrypter(&current_server_traffic_secret, common);
             }
             Side::Server => {
+                #[cfg(feature = "dtls13")]
+                common
+                    .record_layer
+                    .advance_write_epoch();
                 self.ks
                     .set_encrypter(&current_server_traffic_secret, common);
             }

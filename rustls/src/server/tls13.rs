@@ -1435,9 +1435,14 @@ impl State<ServerConnectionData> for ExpectKemtlsCertificate {
 
         flight.finish(cx.common);
 
-        let key_schedule = self
-            .key_schedule
-            .into_main_secret(Some(&client_ss));
+        let hs_hash = self.transcript.current_hash();
+        let key_schedule = self.key_schedule.into_client_authenticated_handshake(
+            &client_ss,
+            &hs_hash,
+            &*self.config.key_log,
+            &self.randoms.client,
+            cx.common,
+        );
 
         cx.common.peer_certificates = Some(owned_chain.clone());
 

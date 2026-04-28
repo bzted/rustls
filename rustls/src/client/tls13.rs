@@ -1504,9 +1504,14 @@ impl State<ClientConnectionData> for ExpectKemtlsEncapsulation {
 
         let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
         let hs_hash = flight.transcript.current_hash();
-        let key_schedule_pre_finished = self
-            .auth_key_schedule
-            .into_main_secret(Some(&client_ss));
+        let key_schedule_pre_finished =
+            self.auth_key_schedule.into_client_authenticated_handshake(
+                &client_ss,
+                &hs_hash,
+                &*self.config.key_log,
+                &self.randoms.client,
+                cx.common,
+            );
         let verify_data = key_schedule_pre_finished.sign_client_finish(&hs_hash);
         emit_finished_tls13(&mut flight, &verify_data);
         debug!("Client: sending Finished message");
