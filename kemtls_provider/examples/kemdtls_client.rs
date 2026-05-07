@@ -17,6 +17,7 @@ use std::path::PathBuf;
 const BUFFER_SIZE: usize = 4096;
 const APP_FRAME_HEADER_LEN: usize = 4;
 const TIMEOUT_SECS: u64 = 1;
+const HANDSHAKE_TIMEOUT_SECS: u64 = 70;
 const APP_RESPONSE_TIMEOUT_SECS: u64 = 1;
 const MAX_APP_RETRIES: usize = 3;
 
@@ -264,6 +265,13 @@ fn is_timeout_error(err: &(dyn std::error::Error + 'static)) -> bool {
         .unwrap_or(false)
 }
 
+fn handshake_timeout_error() -> Box<dyn std::error::Error> {
+    Box::new(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "Handshake failed. Timeout",
+    ))
+}
+
 fn send_dtls_datagram(
     socket: &UdpSocket,
     conn: &mut ClientConnection,
@@ -309,8 +317,13 @@ fn perform_dtls_handshake(
     conn: &mut ClientConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut in_buf = [0u8; BUFFER_SIZE];
+    let deadline = Instant::now() + Duration::from_secs(HANDSHAKE_TIMEOUT_SECS);
 
     loop {
+        if Instant::now() >= deadline {
+            return Err(handshake_timeout_error());
+        }
+
         send_dtls_datagram(socket, conn)?;
 
         if !conn.is_handshaking() {
@@ -319,6 +332,11 @@ fn perform_dtls_handshake(
         }
 
         receive_dtls_datagram(socket, conn, &mut in_buf)?;
+
+        if !conn.is_handshaking() {
+            debug!("DTLS handshake completed");
+            break;
+        }
     }
 
     Ok(())
@@ -441,6 +459,11 @@ fn run_dtls_client(
     let mut conn = ClientConnection::new_dtls(Arc::new(client_config), server_name)?;
 
     perform_dtls_handshake(&socket, &mut conn)?;
+
+    if payload_size == 0 {
+        println!("Handshake completed. No application data sent (-B 0).");
+        return Ok(());
+    }
 
     println!("Waiting for response...");
     let response = exchange_application_data(&socket, &mut conn, payload_size)?;
@@ -843,6 +866,17 @@ fn run_one_dtls_connection(
 
     let t1 = Instant::now();
     let handshake_ms = t1.duration_since(t0).as_secs_f64() * 1000.0;
+
+    if payload_size == 0 {
+        return BenchRow {
+            iter,
+            status: "OK".to_string(),
+            setup_ms,
+            handshake_ms: Some(handshake_ms),
+            transaction_ms: Some(handshake_ms),
+            error: None,
+        };
+    }
 
     match exchange_application_data(&socket, &mut conn, payload_size) {
         Ok(_response) => {

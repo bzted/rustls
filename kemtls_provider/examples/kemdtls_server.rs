@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 const BUFFER_SIZE: usize = 4096;
 const APP_FRAME_HEADER_LEN: usize = 4;
 const TIMEOUT_SECS: u64 = 1;
-const COMPLETED_CLIENT_TIMEOUT_SECS: u64 = 5;
+const HANDSHAKING_CLIENT_TIMEOUT_SECS: u64 = 70;
+const CONNECTED_CLIENT_TIMEOUT_SECS: u64 = 10;
 const HTTP_RESPONSE: &[u8] = b"Hello from TLS Server!";
 
 #[derive(Debug, Clone)]
@@ -715,17 +716,14 @@ fn run_dtls_server(
                     let now = Instant::now();
                     clients.retain(|addr, state| {
                         let (last, timeout) = match state {
-                            ClientState::Handshaking { last_seen, .. } => {
-                                (last_seen, Duration::from_secs(10))
-                            }
-                            ClientState::Connected {
-                                response_sent: true,
+                            ClientState::Handshaking { last_seen, .. } => (
                                 last_seen,
-                                ..
-                            } => (last_seen, Duration::from_secs(COMPLETED_CLIENT_TIMEOUT_SECS)),
-                            ClientState::Connected { last_seen, .. } => {
-                                (last_seen, Duration::from_secs(10))
-                            }
+                                Duration::from_secs(HANDSHAKING_CLIENT_TIMEOUT_SECS),
+                            ),
+                            ClientState::Connected { last_seen, .. } => (
+                                last_seen,
+                                Duration::from_secs(CONNECTED_CLIENT_TIMEOUT_SECS),
+                            ),
                         };
                         if now.duration_since(*last) > timeout {
                             println!("Sesión expirada: {}", addr);
