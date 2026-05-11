@@ -1,24 +1,24 @@
-use kemtls_provider::{provider, get_pq_kx_group_by_name, get_kx_group_by_name, DEFAULT_KX_GROUPS};
+use kemtls_provider::{DEFAULT_KX_GROUPS, get_kx_group_by_name, get_pq_kx_group_by_name, provider};
 use log::debug;
-use rustls::pki_types::pem::PemObject;
+use rustls::crypto::CryptoProvider;
 use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
+use std::cmp::Ordering;
 use std::convert::TryInto;
-use std::io::{stdout, Read, Write};
+use std::io::{Read, Write, stdout};
 use std::net::{TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use rustls::crypto::CryptoProvider;
-use std::cmp::Ordering;
 
 const BUFFER_SIZE: usize = 4096;
 const APP_FRAME_HEADER_LEN: usize = 4;
 const TIMEOUT_SECS: u64 = 1;
+const HANDSHAKE_TIMEOUT_SECS: u64 = 70;
 const APP_RESPONSE_TIMEOUT_SECS: u64 = 1;
 const MAX_APP_RETRIES: usize = 3;
 
 // DTLS Helper Functions
-
 
 #[derive(Debug, Clone)]
 struct Args {
@@ -64,29 +64,27 @@ impl Default for Args {
 }
 
 fn print_help_and_exit() -> ! {
-    println!(
-        concat!(
-            "KEMTLS/DTLS 1.3 Client\n\n",
-            "Options:\n",
-            "  -g, --group <NAME>              KX group to use\n",
-            "      --cid <0-255>               Optional DTLS CID\n",
-            "  -L <N>                          Max fragment length (default: 1300)\n",
-            "  -d                              Disable client authentication\n",
-            "  -c <FILE>                       Certificate file\n",
-            "  -k <FILE>                       Private key file\n",
-            "  -A <FILE>                       CA certificate file\n",
-            "  -p, --port <PORT>               Port (default: 8443)\n",
-            "      --addr <ADDR>               Server address (default: 127.0.0.1)\n",
-            "  -q, --pqc-provider              Activate PQC provider\n",
-            "  -B, --payload-size <N>          Payload bytes (default: 1000)\n",
-            "  -n, --iterations <N>            Benchmark iterations (default: 1)\n",
-            "      --warmup <N>                Warmup iterations (default: 5)\n",
-            "      --csv <FILE>                CSV file for results\n",
-            "      --incremental-ports         Increment local ports for measurements\n",
-            "      --base-local-port <PORT>    Initial local port (default: 50000)\n",
-            "  -h, --help                      Show help\n",
-        )
-    );
+    println!(concat!(
+        "KEMTLS/DTLS 1.3 Client\n\n",
+        "Options:\n",
+        "  -g, --group <NAME>              KX group to use\n",
+        "      --cid <0-255>               Optional DTLS CID\n",
+        "  -L <N>                          Max fragment length (default: 1300)\n",
+        "  -d                              Disable client authentication\n",
+        "  -c <FILE>                       Certificate file\n",
+        "  -k <FILE>                       Private key file\n",
+        "  -A <FILE>                       CA certificate file\n",
+        "  -p, --port <PORT>               Port (default: 8443)\n",
+        "      --addr <ADDR>               Server address (default: 127.0.0.1)\n",
+        "  -q, --pqc-provider              Activate PQC provider\n",
+        "  -B, --payload-size <N>          Payload bytes (default: 1000)\n",
+        "  -n, --iterations <N>            Benchmark iterations (default: 1)\n",
+        "      --warmup <N>                Warmup iterations (default: 5)\n",
+        "      --csv <FILE>                CSV file for results\n",
+        "      --incremental-ports         Increment local ports for measurements\n",
+        "      --base-local-port <PORT>    Initial local port (default: 50000)\n",
+        "  -h, --help                      Show help\n",
+    ));
     std::process::exit(0);
 }
 
@@ -94,8 +92,12 @@ fn parse_value<T: std::str::FromStr>(
     iter: &mut std::iter::Peekable<impl Iterator<Item = String>>,
     flag: &str,
 ) -> Result<T, String> {
-    let value = iter.next().ok_or_else(|| format!("missing value for {flag}"))?;
-    value.parse::<T>().map_err(|_| format!("invalid value for {flag}: {value}"))
+    let value = iter
+        .next()
+        .ok_or_else(|| format!("missing value for {flag}"))?;
+    value
+        .parse::<T>()
+        .map_err(|_| format!("invalid value for {flag}: {value}"))
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -115,21 +117,72 @@ fn parse_args() -> Result<Args, String> {
             "-p" | "--port" => args.port = parse_value(&mut iter, "--port")?,
             "--addr" => args.addr = parse_value(&mut iter, "--addr")?,
             "-q" | "--pqc-provider" => args.pqc_provider = true,
-            "-B" | "--payload-size" => args.payload_size = parse_value(&mut iter, "--payload-size")?,
+            "-B" | "--payload-size" => {
+                args.payload_size = parse_value(&mut iter, "--payload-size")?
+            }
             "-n" | "--iterations" => args.iterations = parse_value(&mut iter, "--iterations")?,
             "--warmup" => args.warmup = parse_value(&mut iter, "--warmup")?,
             "--csv" => args.csv = Some(parse_value(&mut iter, "--csv")?),
             "--incremental-ports" => args.incremental_ports = true,
-            "--base-local-port" => args.base_local_port = parse_value(&mut iter, "--base-local-port")?,
-            _ if arg.starts_with("--group=") => args.group = Some(arg["--group=".len()..].to_string()),
-            _ if arg.starts_with("--cid=") => args.cid = Some(arg["--cid=".len()..].parse().map_err(|_| format!("invalid value for --cid: {}", &arg["--cid=".len()..]))?),
-            _ if arg.starts_with("--port=") => args.port = arg["--port=".len()..].parse().map_err(|_| format!("invalid value for --port: {}", &arg["--port=".len()..]))?,
+            "--base-local-port" => {
+                args.base_local_port = parse_value(&mut iter, "--base-local-port")?
+            }
+            _ if arg.starts_with("--group=") => {
+                args.group = Some(arg["--group=".len()..].to_string())
+            }
+            _ if arg.starts_with("--cid=") => {
+                args.cid = Some(
+                    arg["--cid=".len()..]
+                        .parse()
+                        .map_err(|_| {
+                            format!("invalid value for --cid: {}", &arg["--cid=".len()..])
+                        })?,
+                )
+            }
+            _ if arg.starts_with("--port=") => {
+                args.port = arg["--port=".len()..]
+                    .parse()
+                    .map_err(|_| format!("invalid value for --port: {}", &arg["--port=".len()..]))?
+            }
             _ if arg.starts_with("--addr=") => args.addr = arg["--addr=".len()..].to_string(),
-            _ if arg.starts_with("--payload-size=") => args.payload_size = arg["--payload-size=".len()..].parse().map_err(|_| format!("invalid value for --payload-size: {}", &arg["--payload-size=".len()..]))?,
-            _ if arg.starts_with("--iterations=") => args.iterations = arg["--iterations=".len()..].parse().map_err(|_| format!("invalid value for --iterations: {}", &arg["--iterations=".len()..]))?,
-            _ if arg.starts_with("--warmup=") => args.warmup = arg["--warmup=".len()..].parse().map_err(|_| format!("invalid value for --warmup: {}", &arg["--warmup=".len()..]))?,
+            _ if arg.starts_with("--payload-size=") => {
+                args.payload_size = arg["--payload-size=".len()..]
+                    .parse()
+                    .map_err(|_| {
+                        format!(
+                            "invalid value for --payload-size: {}",
+                            &arg["--payload-size=".len()..]
+                        )
+                    })?
+            }
+            _ if arg.starts_with("--iterations=") => {
+                args.iterations = arg["--iterations=".len()..]
+                    .parse()
+                    .map_err(|_| {
+                        format!(
+                            "invalid value for --iterations: {}",
+                            &arg["--iterations=".len()..]
+                        )
+                    })?
+            }
+            _ if arg.starts_with("--warmup=") => {
+                args.warmup = arg["--warmup=".len()..]
+                    .parse()
+                    .map_err(|_| {
+                        format!("invalid value for --warmup: {}", &arg["--warmup=".len()..])
+                    })?
+            }
             _ if arg.starts_with("--csv=") => args.csv = Some(arg["--csv=".len()..].to_string()),
-            _ if arg.starts_with("--base-local-port=") => args.base_local_port = arg["--base-local-port=".len()..].parse().map_err(|_| format!("invalid value for --base-local-port: {}", &arg["--base-local-port=".len()..]))?,
+            _ if arg.starts_with("--base-local-port=") => {
+                args.base_local_port = arg["--base-local-port=".len()..]
+                    .parse()
+                    .map_err(|_| {
+                        format!(
+                            "invalid value for --base-local-port: {}",
+                            &arg["--base-local-port=".len()..]
+                        )
+                    })?
+            }
             _ => return Err(format!("unknown argument: {arg}")),
         }
     }
@@ -157,7 +210,10 @@ fn select_kx_group(crypto_provider: &mut CryptoProvider, group: &str, pqc: bool)
     }
 }
 
-fn setup_udp_socket(server_addr: &str, local_port: Option<u16>) -> Result<UdpSocket, std::io::Error> {
+fn setup_udp_socket(
+    server_addr: &str,
+    local_port: Option<u16>,
+) -> Result<UdpSocket, std::io::Error> {
     let bind_addr = match local_port {
         Some(port) => format!("0.0.0.0:{port}"),
         None => "0.0.0.0:0".to_string(),
@@ -183,20 +239,27 @@ fn is_timeout_error(err: &(dyn std::error::Error + 'static)) -> bool {
         .unwrap_or(false)
 }
 
+fn handshake_timeout_error() -> Box<dyn std::error::Error> {
+    Box::new(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "Handshake failed. Timeout",
+    ))
+}
+
 fn send_dtls_datagram(
     socket: &UdpSocket,
     conn: &mut ClientConnection,
 ) -> Result<(), std::io::Error> {
     while conn.wants_write() {
-            let mut out_buf = Vec::new();
-            match conn.write_dtls(&mut out_buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    debug!("DTLS datagram len = {} bytes", n);
-                    socket.send(&out_buf)?;
-                }
-                Err(e) => return Err(e),
+        let mut out_buf = Vec::new();
+        match conn.write_dtls(&mut out_buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                debug!("DTLS datagram len = {} bytes", n);
+                socket.send(&out_buf)?;
             }
+            Err(e) => return Err(e),
+        }
     }
     Ok(())
 }
@@ -206,8 +269,8 @@ fn receive_dtls_datagram(
     conn: &mut ClientConnection,
     buffer: &mut [u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    match socket.recv(buffer){
-        Ok(n) =>{
+    match socket.recv(buffer) {
+        Ok(n) => {
             let mut slice = &buffer[..n];
             while !slice.is_empty() {
                 conn.read_tls(&mut slice)?;
@@ -216,14 +279,11 @@ fn receive_dtls_datagram(
         }
         Err(e) if is_error(&e) => {
             conn.process_new_packets()?;
-        }    
-        Err(e) =>{
-            return Err(Box::new(e))
-        } 
+        }
+        Err(e) => return Err(Box::new(e)),
     }
 
-
-    Ok(()) 
+    Ok(())
 }
 
 fn perform_dtls_handshake(
@@ -231,8 +291,13 @@ fn perform_dtls_handshake(
     conn: &mut ClientConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut in_buf = [0u8; BUFFER_SIZE];
+    let deadline = Instant::now() + Duration::from_secs(HANDSHAKE_TIMEOUT_SECS);
 
     loop {
+        if Instant::now() >= deadline {
+            return Err(handshake_timeout_error());
+        }
+
         send_dtls_datagram(socket, conn)?;
 
         if !conn.is_handshaking() {
@@ -241,6 +306,11 @@ fn perform_dtls_handshake(
         }
 
         receive_dtls_datagram(socket, conn, &mut in_buf)?;
+
+        if !conn.is_handshaking() {
+            debug!("DTLS handshake completed");
+            break;
+        }
     }
 
     Ok(())
@@ -354,7 +424,6 @@ fn exchange_application_data(
     }))
 }
 
-
 fn run_dtls_client(
     client_config: ClientConfig,
     server_name: rustls::pki_types::ServerName<'static>,
@@ -365,6 +434,11 @@ fn run_dtls_client(
     let mut conn = ClientConnection::new_dtls(Arc::new(client_config), server_name)?;
 
     perform_dtls_handshake(&socket, &mut conn)?;
+
+    if payload_size == 0 {
+        println!("Handshake completed. No application data sent (-B 0).");
+        return Ok(());
+    }
 
     println!("Waiting for response...");
     let response = exchange_application_data(&socket, &mut conn, payload_size)?;
@@ -457,24 +531,23 @@ fn main() {
     let pk = rustls::pki_types::PrivateKeyDer::from_pem_file(args.pk_file).unwrap();
 
     let mut client_config = match args.client_auth {
-        true => {
-            ClientConfig::builder_with_provider(crypto_provider.into())
-                .with_safe_default_protocol_versions().unwrap()
-                .with_root_certificates(root_store)
-                .with_client_auth_cert(cert, pk).unwrap()
-        }
+        true => ClientConfig::builder_with_provider(crypto_provider.into())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(root_store)
+            .with_client_auth_cert(cert, pk)
+            .unwrap(),
 
-        false => {
-            ClientConfig::builder_with_provider(crypto_provider.into())
-                .with_safe_default_protocol_versions().unwrap()
-                .with_root_certificates(root_store)
-                .with_no_client_auth()
-        }
+        false => ClientConfig::builder_with_provider(crypto_provider.into())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(root_store)
+            .with_no_client_auth(),
     };
 
     // Disable session resumption for testing purposes
     client_config.resumption = rustls::client::Resumption::disabled();
-    
+
     let server_name: rustls::pki_types::ServerName<'static> = args.addr.clone().try_into().unwrap();
     let server_addr = format!("{}:{}", args.addr, args.port);
 
@@ -486,7 +559,7 @@ fn main() {
             println!("Offering CID: {}", cid_val);
             let _ = client_config.set_cid(&[cid_val]);
         }
-        
+
         if args.iterations > 1 || args.csv.is_some() {
             run_dtls_benchmark(
                 client_config,
@@ -572,6 +645,16 @@ fn run_one_dtls_connection(
     let t1 = std::time::Instant::now();
     let handshake_ms = t1.duration_since(t0).as_secs_f64() * 1000.0;
 
+    if payload_size == 0 {
+        return BenchRow {
+            iter,
+            status: "OK".to_string(),
+            handshake_ms: Some(handshake_ms),
+            transaction_ms: Some(handshake_ms),
+            error: None,
+        };
+    }
+
     match exchange_application_data(&socket, &mut conn, payload_size) {
         Ok(_response) => {
             let t2 = std::time::Instant::now();
@@ -595,25 +678,20 @@ fn run_one_dtls_connection(
     }
 }
 
-fn write_bench_csv(
-    path: &str,
-    rows: &[BenchRow],
-) -> Result<(), Box<dyn std::error::Error>> {
+fn write_bench_csv(path: &str, rows: &[BenchRow]) -> Result<(), Box<dyn std::error::Error>> {
     let mut wtr = csv::Writer::from_path(path)?;
-    wtr.write_record([
-        "iter",
-        "status",
-        "handshake_ms",
-        "transaction_ms",
-        "error",
-    ])?;
+    wtr.write_record(["iter", "status", "handshake_ms", "transaction_ms", "error"])?;
 
     for row in rows {
         wtr.write_record([
             row.iter.to_string(),
             row.status.clone(),
-            row.handshake_ms.map(|v| format!("{:.4}", v)).unwrap_or_default(),
-            row.transaction_ms.map(|v| format!("{:.4}", v)).unwrap_or_default(),
+            row.handshake_ms
+                .map(|v| format!("{:.4}", v))
+                .unwrap_or_default(),
+            row.transaction_ms
+                .map(|v| format!("{:.4}", v))
+                .unwrap_or_default(),
             row.error.clone().unwrap_or_default(),
         ])?;
     }
@@ -648,7 +726,7 @@ fn run_dtls_benchmark(
             server_name.clone(),
             server_addr,
             payload_size,
-            local_port
+            local_port,
         );
     }
 
@@ -695,7 +773,10 @@ fn run_dtls_benchmark(
             println!("Mediana transaction_ms: {:.4} ms", stats.median_ms);
             println!("Min transaction_ms: {:.4} ms", stats.min_ms);
             println!("Max transaction_ms: {:.4} ms", stats.max_ms);
-            println!("Desviación estándar transaction_ms: {:.4} ms", stats.stddev_ms);
+            println!(
+                "Desviación estándar transaction_ms: {:.4} ms",
+                stats.stddev_ms
+            );
         } else {
             println!("No hay medidas válidas para calcular estadísticas.");
         }
@@ -706,7 +787,10 @@ fn run_dtls_benchmark(
             println!("Mediana transaction_ms: {:.4} ms", stats.median_ms);
             println!("Min transaction_ms: {:.4} ms", stats.min_ms);
             println!("Max transaction_ms: {:.4} ms", stats.max_ms);
-            println!("Desviación estándar transaction_ms: {:.4} ms", stats.stddev_ms);
+            println!(
+                "Desviación estándar transaction_ms: {:.4} ms",
+                stats.stddev_ms
+            );
         } else {
             println!("No hay medidas válidas para calcular estadísticas.");
         }
@@ -766,13 +850,19 @@ fn compute_summary_stats(rows: &[BenchRow]) -> Option<SummaryStats> {
 
     let iterations_total = rows.len();
     let iterations_ok = valid.len();
-    let iterations_error = rows.iter().filter(|r| r.status == "ERROR").count();
+    let iterations_error = rows
+        .iter()
+        .filter(|r| r.status == "ERROR")
+        .count();
     let iterations_timeout = rows
         .iter()
         .filter(|r| {
             r.error
                 .as_deref()
-                .map(|e| e.to_ascii_lowercase().contains("timeout"))
+                .map(|e| {
+                    e.to_ascii_lowercase()
+                        .contains("timeout")
+                })
                 .unwrap_or(false)
         })
         .count();
@@ -781,7 +871,10 @@ fn compute_summary_stats(rows: &[BenchRow]) -> Option<SummaryStats> {
         return None;
     }
 
-    valid.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    valid.sort_by(|a, b| {
+        a.partial_cmp(b)
+            .unwrap_or(Ordering::Equal)
+    });
 
     let sum_ms: f64 = valid.iter().sum();
     let mean_ms = sum_ms / valid.len() as f64;
@@ -790,7 +883,8 @@ fn compute_summary_stats(rows: &[BenchRow]) -> Option<SummaryStats> {
     let max_ms = valid[valid.len() - 1];
 
     let variance = if valid.len() > 1 {
-        valid.iter()
+        valid
+            .iter()
             .map(|v| {
                 let d = *v - mean_ms;
                 d * d
@@ -817,10 +911,7 @@ fn compute_summary_stats(rows: &[BenchRow]) -> Option<SummaryStats> {
     })
 }
 
-fn write_summary_csv(
-    path: &str,
-    stats: &SummaryStats,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn write_summary_csv(path: &str, stats: &SummaryStats) -> Result<(), Box<dyn std::error::Error>> {
     let mut wtr = csv::Writer::from_path(path)?;
     wtr.write_record(["metric", "value"])?;
 
